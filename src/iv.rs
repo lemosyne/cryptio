@@ -1,7 +1,4 @@
-use crate::{
-    blocky::{Block, BlockIo},
-    Key,
-};
+use crate::Key;
 use crypter::Crypter;
 use embedded_io::{
     blocking::{Read, Seek, Write},
@@ -11,8 +8,21 @@ use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use std::marker::PhantomData;
 
+pub enum Block {
+    Empty,
+    Unaligned {
+        iv: Vec<u8>,
+        data: Vec<u8>,
+        fill: usize,
+    },
+    Aligned {
+        iv: Vec<u8>,
+        data: Vec<u8>,
+    },
+}
+
 pub struct BlockIvCryptoIo<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> {
-    io: BlockIo<IO>,
+    io: IO,
     kms: &'a mut KMS,
     rng: R,
     pd: PhantomData<C>,
@@ -21,23 +31,107 @@ pub struct BlockIvCryptoIo<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ:
 impl<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize>
     BlockIvCryptoIo<'a, IO, KMS, R, C, BLK_SZ, KEY_SZ>
 where
-    IO: Read + Write + Seek,
+    IO: Seek,
     R: RngCore + CryptoRng,
     C: Crypter,
 {
+    /// Constructs a new `BlockIvCryptoIo`.
     pub fn new(io: IO, kms: &'a mut KMS, rng: R) -> Self {
         Self {
-            io: BlockIo::new(io, C::iv_length(), BLK_SZ),
+            io,
             kms,
             rng,
             pd: PhantomData,
         }
     }
 
+    /// Returns if `offset` is aligned to a block boundary.
+    fn offset_is_aligned(&self, offset: usize) -> bool {
+        self.offset_padding(offset) == 0
+    }
+
+    /// Returns the block that `offset` falls under.
+    fn offset_block(&self, offset: usize) -> usize {
+        offset / BLK_SZ
+    }
+
+    /// Returns the size of a padded block.
+    fn padded_block_size(&self) -> usize {
+        BLK_SZ + C::iv_length()
+    }
+
+    /// Returns `offset` aligned to the start of its block.
+    fn offset_aligned(&self, offset: usize) -> usize {
+        (offset / BLK_SZ) * self.padded_block_size()
+    }
+
+    /// Returns the distance from `offset` to the start of its block.
+    fn offset_padding(&self, offset: usize) -> usize {
+        offset % BLK_SZ
+    }
+
+    /// Returns the distance from `offset` to the end of the IV at the start of its block.
+    fn offset_fill(&self, offset: usize) -> usize {
+        offset - (self.offset_block(offset) * BLK_SZ)
+    }
+
+    /// Generates a new IV.
     fn generate_iv(&mut self) -> Vec<u8> {
         let mut iv = vec![0; C::iv_length()];
         self.rng.fill_bytes(&mut iv);
         iv
+    }
+
+    /// Extracts out the IV and data from a raw block.
+    fn extract_iv_data(&self, mut raw: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
+        (raw.drain(..C::iv_length()).collect(), raw)
+    }
+
+    /// Returns our current offset.
+    fn curr_offset(&mut self) -> Result<usize, IO::Error> {
+        self.io.stream_position().map(|offset| offset as usize)
+    }
+
+    /// Reads a block from a given offset.
+    fn read_block(&mut self, offset: usize) -> Result<Block, IO::Error>
+    where
+        IO: Read,
+    {
+        let aligned = self.offset_aligned(offset);
+        let padding = self.offset_padding(offset);
+        let fill = self.offset_fill(offset);
+
+        self.io.seek(SeekFrom::Start(aligned as u64))?;
+
+        let mut raw = vec![0; self.padded_block_size()];
+        let nbytes = self.io.read(&mut raw)?;
+
+        // Restore seek cursor if we didn't read anything.
+        if nbytes == 0 || nbytes < padding + C::iv_length() {
+            self.io.seek(SeekFrom::Start(offset as u64))?;
+            return Ok(Block::Empty);
+        }
+
+        raw.truncate(nbytes);
+
+        let (iv, data) = self.extract_iv_data(raw);
+
+        if padding == 0 {
+            Ok(Block::Aligned { iv, data })
+        } else {
+            Ok(Block::Unaligned { iv, data, fill })
+        }
+    }
+
+    /// Writes a block with a prepended IV to a given offset.
+    fn write_block(&mut self, offset: usize, iv: &[u8], data: &[u8]) -> Result<usize, IO::Error>
+    where
+        IO: Read + Write,
+    {
+        let aligned = self.offset_aligned(offset);
+        self.io.seek(SeekFrom::Start(aligned as u64))?;
+        self.io.write(&iv)?;
+        Ok(self.io.write(&data)?)
     }
 }
 
@@ -63,19 +157,19 @@ where
         let mut size = buf.len();
 
         // Easier to track where we are in the stream.
-        let origin = self.io.stream_position()?;
-        let mut offset = origin as usize;
+        let origin = self.curr_offset()?;
+        let mut offset = origin;
 
         while size > 0 {
-            match self.io.read_block(offset as u64)? {
+            match self.read_block(offset)? {
                 Block::Empty => {
                     break;
                 }
                 Block::Unaligned { iv, data, fill } => {
-                    let block = self.io.curr_block(offset as u64);
+                    let block = self.offset_block(offset);
 
                     // Decrypt the bytes we read.
-                    let key = self.kms.derive(block).map_err(|_| ()).unwrap();
+                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
                     let pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
                     // Calculate the number of bytes we've actually read and copy those bytes in.
@@ -91,10 +185,10 @@ where
                     total += nbytes;
                 }
                 Block::Aligned { iv, data } => {
-                    let block = self.io.curr_block(offset as u64);
+                    let block = self.offset_block(offset);
 
                     // Decrypt the bytes we read.
-                    let key = self.kms.derive(block).map_err(|_| ()).unwrap();
+                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
                     let pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
                     // Copy in the decrypted bytes.
@@ -112,7 +206,7 @@ where
             }
         }
 
-        self.io.seek(SeekFrom::Start(origin + total as u64))?;
+        self.io.seek(SeekFrom::Start((origin + total) as u64))?;
 
         Ok(total)
     }
@@ -131,23 +225,23 @@ where
         let mut total = 0;
         let mut size = buf.len();
 
-        let origin = self.io.stream_position()?;
-        let mut offset = origin as usize;
+        let origin = self.curr_offset()?;
+        let mut offset = origin;
 
         // If we aren't block-aligned, then we need to rewrite the bytes preceding our current
         // offset in the block.
-        if !self.io.is_aligned(offset as u64) {
-            match self.io.read_block(offset as u64)? {
+        if !self.offset_is_aligned(offset) {
+            match self.read_block(offset)? {
                 // There should be something there, but we didn't read anything.
                 Block::Empty => {
-                    self.io.seek(SeekFrom::Start(origin))?;
+                    self.io.seek(SeekFrom::Start(origin as u64))?;
                     return Ok(total);
                 }
                 Block::Unaligned { iv, data, fill } => {
-                    let block = self.io.curr_block(offset as u64);
+                    let block = self.offset_block(offset);
 
                     // Decrypt the bytes we read.
-                    let key = self.kms.derive(block).map_err(|_| ()).unwrap();
+                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
                     let mut pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
                     // Extending the plaintext to a full block covers the case when what we are
@@ -162,15 +256,15 @@ where
 
                     // Re-encrypt the plaintext.
                     let iv = self.generate_iv();
-                    let key = self.kms.update(block).map_err(|_| ()).unwrap();
+                    let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
                     let ct = C::encrypt(&key, &iv, &pt).map_err(|_| ()).unwrap();
 
                     // Write the IV and ciphertext.
                     let amount = pt.len().max(fill + rest);
-                    let nbytes = self.io.write_block(offset as u64, &iv, &ct[..amount])?;
+                    let nbytes = self.write_block(offset, &iv, &ct[..amount])?;
                     let written = rest.min(nbytes - fill);
                     if nbytes == 0 || written == 0 {
-                        self.io.seek(SeekFrom::Start(origin))?;
+                        self.io.seek(SeekFrom::Start(origin as u64))?;
                         return Ok(0);
                     }
 
@@ -185,20 +279,20 @@ where
         }
 
         // We write full blocks of data as long as we're block-aligned.
-        while size > 0 && size / BLK_SZ > 0 && self.io.is_aligned(offset as u64) {
-            let block = self.io.curr_block(offset as u64);
+        while size > 0 && size / BLK_SZ > 0 && self.offset_is_aligned(offset) {
+            let block = self.offset_block(offset);
 
             // Encrypt the data.
             let iv = self.generate_iv();
-            let key = self.kms.update(block).map_err(|_| ()).unwrap();
+            let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
             let ct = C::encrypt(&key, &iv, &buf[total..total + BLK_SZ])
                 .map_err(|_| ())
                 .unwrap();
 
             // Write the IV and ciphertext.
-            let nbytes = self.io.write_block(offset as u64, &iv, &ct)?;
+            let nbytes = self.write_block(offset, &iv, &ct)?;
             if nbytes == 0 {
-                self.io.seek(SeekFrom::Start(origin + total as u64))?;
+                self.io.seek(SeekFrom::Start((origin + total) as u64))?;
                 return Ok(total);
             }
 
@@ -209,28 +303,28 @@ where
 
         // We have remaining bytes that don't fill an entire block.
         if size > 0 {
-            match self.io.read_block(offset as u64)? {
+            match self.read_block(offset)? {
                 // Receiving block empty means that there aren't any trailing bytes that we need to
                 // rewrite, so we can just go ahead and write out the remaining bytes.
                 Block::Empty => {
-                    let block = self.io.curr_block(offset as u64);
+                    let block = self.offset_block(offset);
 
                     // Encrypt the remaining bytes.
                     let iv = self.generate_iv();
-                    let key = self.kms.update(block).map_err(|_| ()).unwrap();
+                    let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
                     let ct = C::encrypt(&key, &iv, &buf[total..total + size])
                         .map_err(|_| ())
                         .unwrap();
 
                     // Write the block.
-                    total += self.io.write_block(offset as u64, &iv, &ct)?;
+                    total += self.write_block(offset, &iv, &ct)?;
                 }
                 // We need to rewrite any bytes trailing the overwritten bytes.
                 Block::Aligned { iv, data } => {
-                    let block = self.io.curr_block(offset as u64);
+                    let block = self.offset_block(offset);
 
                     // Decrypt the bytes.
-                    let key = self.kms.derive(block).map_err(|_| ()).unwrap();
+                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
                     let mut pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
                     // Copy in the bytes that we want to update.
@@ -238,12 +332,12 @@ where
 
                     // Encrypt the plaintext.
                     let iv = self.generate_iv();
-                    let key = self.kms.update(block).map_err(|_| ()).unwrap();
+                    let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
                     let ct = C::encrypt(&key, &iv, &pt).map_err(|_| ()).unwrap();
 
                     // Write the block.
                     let nbytes = size.max(pt.len());
-                    self.io.write_block(offset as u64, &iv, &ct[..nbytes])?;
+                    self.write_block(offset, &iv, &ct[..nbytes])?;
 
                     total += size.min(nbytes);
                 }
@@ -253,13 +347,13 @@ where
             }
         }
 
-        self.io.seek(SeekFrom::Start(origin + total as u64))?;
+        self.io.seek(SeekFrom::Start((origin + total) as u64))?;
 
         Ok(total)
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.io.io.flush()
+        self.io.flush()
     }
 }
 
