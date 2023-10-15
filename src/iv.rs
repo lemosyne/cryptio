@@ -58,46 +58,54 @@ where
     C: Crypter,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        // Track the bytes we've read and we need to read.
         let mut total = 0;
         let mut size = buf.len();
+
+        // Easier to track where we are in the stream.
         let origin = self.io.stream_position()?;
+        let mut offset = origin as usize;
 
         while size > 0 {
-            match self.io.read_block()? {
+            match self.io.read_block(offset as u64)? {
                 Block::Empty => {
                     break;
                 }
-                Block::Unaligned {
-                    iv,
-                    data,
-                    padding: _,
-                } => {
-                    let block = self.io.curr_block()?;
+                Block::Unaligned { iv, data, fill } => {
+                    let block = self.io.curr_block(offset as u64);
 
+                    // Decrypt the bytes we read.
                     let key = self.kms.derive(block).map_err(|_| ()).unwrap();
                     let pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
-                    buf[total..total + pt.len()].copy_from_slice(&pt[..]);
+                    // Calculate the number of bytes we've actually read.
+                    let nbytes = pt.len() - fill;
+                    size -= nbytes;
+                    offset += nbytes;
+                    total += nbytes;
 
-                    total += pt.len();
-                    size -= pt.len();
+                    // Copy in the decrypted bytes after the fill bytes.
+                    buf[total..total + nbytes].copy_from_slice(&pt[fill..fill + nbytes]);
                 }
                 Block::Aligned { iv, data } => {
-                    let block = self.io.curr_block()?;
+                    let block = self.io.curr_block(offset as u64);
 
+                    // Decrypt the bytes we read.
                     let key = self.kms.derive(block).map_err(|_| ()).unwrap();
                     let pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
-                    buf[total..total + pt.len()].copy_from_slice(&pt[..]);
-
-                    total += pt.len();
+                    // Calculate the number of bytes we've actually read.
                     size -= pt.len();
+                    offset += pt.len();
+                    total += pt.len();
+
+                    // Copy in the decrypted bytes.
+                    buf[total..total + pt.len()].copy_from_slice(&pt[..]);
                 }
             }
         }
 
-        self.io.seek(SeekFrom::Start(origin + total as u64))?;
-
+        // Return the total number of bytes read.
         Ok(total)
     }
 }
@@ -111,92 +119,110 @@ where
     C: Crypter,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        // Track the bytes we've written and we need to write.
         let mut total = 0;
         let mut size = buf.len();
+
         let origin = self.io.stream_position()?;
+        let mut offset = origin as usize;
 
         // If we aren't block-aligned, then we need to rewrite the bytes preceding our current
         // offset in the block.
-        if self.io.is_aligned()? {
-            match self.io.read_block()? {
+        if !self.io.is_aligned(offset as u64) {
+            match self.io.read_block(offset as u64)? {
                 Block::Empty => {
                     // There should be something there, but we didn't read anything.
                     return Ok(total);
                 }
-                Block::Unaligned {
-                    iv,
-                    data,
-                    padding: _,
-                } => {
-                    let block = self.io.curr_block()?;
+                Block::Unaligned { iv, data, fill } => {
+                    let block = self.io.curr_block(offset as u64);
 
+                    // Decrypt the bytes we read.
                     let key = self.kms.derive(block).map_err(|_| ()).unwrap();
                     let mut pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
-                    // copy in bytes to write to decrypted plaintext
-                    let fill = origin as usize % BLK_SZ;
-                    let rest = size.min(BLK_SZ - fill);
-                    pt[fill..fill + rest].copy_from_slice(&buf[..rest]);
+                    // Calculate the number of bytes we've actually read and update the bytes we're
+                    // trying to overwrite in the plaintext.
+                    let nbytes = pt.len() - fill;
+                    pt[fill..fill + nbytes].copy_from_slice(&buf[..nbytes]);
 
+                    // Re-encrypt the plaintext.
                     let iv = self.generate_iv();
                     let key = self.kms.update(block).map_err(|_| ()).unwrap();
-                    let ct = C::encrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
+                    let ct = C::encrypt(&key, &iv, &pt).map_err(|_| ()).unwrap();
 
-                    // write the block
-                    self.io.write_block(&iv, &ct)?;
+                    // Write the IV and ciphertext.
+                    self.io.write_block(offset as u64, &iv, &ct)?;
 
-                    total += ct.len();
-                    size -= ct.len();
+                    size -= nbytes;
+                    offset += nbytes;
+                    total += nbytes;
                 }
-                _ => {}
+                _ => {
+                    panic!("shouldn't have gotten a block-aligned read")
+                }
             }
         }
 
-        // We're block aligned at this point. We'll continue to write as many full blocks of data
-        // as possible.
-        // TODO: check this alignment
-        while size > 0 && size / BLK_SZ > 0 && self.io.is_aligned()? {
-            let block = self.io.curr_block()?;
+        // We write full blocks of data as long as we're block-aligned.
+        while size > 0 && size / BLK_SZ > 0 && self.io.is_aligned(offset as u64) {
+            let block = self.io.curr_block(offset as u64);
 
+            // Encrypt the data.
             let iv = self.generate_iv();
             let key = self.kms.update(block).map_err(|_| ()).unwrap();
             let ct = C::encrypt(&key, &iv, &buf[total..total + BLK_SZ])
                 .map_err(|_| ())
                 .unwrap();
 
-            // write the block
+            // Write the IV and ciphertext.
+            let nbytes = self.io.write_block(offset as u64, &iv, &ct)?;
 
-            total += ct.len();
-            size -= ct.len();
+            total += nbytes;
+            offset += nbytes;
+            size -= nbytes;
         }
 
-        // We have remaining bytes that don't fill an entire block. We need to rewrite the bytes in
-        // the block trailing the overwritten bytes.
+        // We have remaining bytes that don't fill an entire block.
         if size > 0 {
-            match self.io.read_block()? {
-                Block::Aligned { iv, data } => {
-                    let block = self.io.curr_block()?;
+            match self.io.read_block(offset as u64)? {
+                // Receiving block empty means that there aren't any trailing bytes that we need to
+                // rewrite, so we can just go ahead and write out the remaining bytes.
+                Block::Empty => {
+                    let block = self.io.curr_block(offset as u64);
 
+                    // Encrypt the remaining bytes.
+                    let iv = self.generate_iv();
+                    let key = self.kms.update(block).map_err(|_| ()).unwrap();
+                    let mut ct = C::encrypt(&key, &iv, &buf[total..total + size])
+                        .map_err(|_| ())
+                        .unwrap();
+
+                    // Write the block.
+                    total += self.io.write_block(offset as u64, &iv, &ct)?;
+                }
+                // We need to rewrite any bytes trailing the overwritten bytes.
+                Block::Aligned { iv, data } => {
+                    let block = self.io.curr_block(offset as u64);
+
+                    // Decrypt the bytes.
                     let key = self.kms.derive(block).map_err(|_| ()).unwrap();
                     let mut pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
-                    // copy in bytes to write to decrypted plaintext
+                    // Copy in the bytes that we want to update.
                     pt[..size].copy_from_slice(&buf[total..total + size]);
 
+                    // Encrypt the plaintext.
                     let iv = self.generate_iv();
                     let key = self.kms.update(block).map_err(|_| ()).unwrap();
                     let ct = C::encrypt(&key, &iv, &pt).map_err(|_| ()).unwrap();
 
-                    // write the block
-                    self.io.write_block(&iv, &ct)?;
-
-                    total += ct.len();
+                    // Write the block.
+                    total += self.io.write_block(offset as u64, &iv, &ct)?;
                 }
                 _ => {}
             }
         }
-
-        self.io.seek(SeekFrom::Start(origin + total as u64))?;
 
         Ok(total)
     }

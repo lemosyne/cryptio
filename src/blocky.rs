@@ -14,7 +14,7 @@ pub enum Block {
     Unaligned {
         iv: Vec<u8>,
         data: Vec<u8>,
-        padding: u64,
+        fill: usize,
     },
     Aligned {
         iv: Vec<u8>,
@@ -36,17 +36,13 @@ where
     }
 
     // Returns if the underlying IO is aligned to a block boundary.
-    pub fn is_aligned(&mut self) -> Result<bool, IO::Error> {
-        self.io
-            .stream_position()
-            .map(|offset| self.padding(offset) == 0)
+    pub fn is_aligned(&self, offset: u64) -> bool {
+        self.padding(offset) == 0
     }
 
     /// Returns the current block number.
-    pub fn curr_block(&mut self) -> Result<u64, IO::Error> {
-        self.io
-            .stream_position()
-            .map(|offset| offset / self.padded_block_size() as u64)
+    pub fn curr_block(&self, offset: u64) -> u64 {
+        offset / self.block_size as u64
     }
 
     /// Returns the block size.
@@ -56,12 +52,17 @@ where
 
     // Aligns `offset` to the start of its block.
     fn align(&self, offset: u64) -> u64 {
-        (offset / self.padded_block_size()) * self.padded_block_size()
+        (offset / self.block_size as u64) * self.padded_block_size()
     }
 
     // Returns the distance, in bytes, from `offset` to the start of its block.
     fn padding(&self, offset: u64) -> u64 {
-        offset % self.padded_block_size()
+        offset % self.block_size as u64
+    }
+
+    /// Returns the distance, in bytes, from `offset` to the IV at the start of the block.
+    fn fill(&self, offset: u64) -> u64 {
+        offset - self.padding(offset)
     }
 
     // Extracts out the IV.
@@ -70,13 +71,13 @@ where
     }
 
     // Reads a block.
-    pub fn read_block(&mut self) -> Result<Block, IO::Error>
+    pub fn read_block(&mut self, pos: u64) -> Result<Block, IO::Error>
     where
         IO: Read,
     {
-        let pos = self.io.stream_position()?;
         let offset = self.align(pos);
         let padding = self.padding(pos);
+        let fill = self.fill(pos);
 
         self.io.seek(SeekFrom::Start(offset))?;
 
@@ -94,26 +95,28 @@ where
         let (iv, data) = self.extract_iv(raw);
 
         if padding != 0 {
-            Ok(Block::Unaligned { iv, data, padding })
+            Ok(Block::Unaligned {
+                iv,
+                data,
+                fill: fill as usize,
+            })
         } else {
             Ok(Block::Aligned { iv, data })
         }
     }
 
     // Writes a block.
-    pub fn write_block(&mut self, iv: &[u8], data: &[u8]) -> Result<(), IO::Error>
+    pub fn write_block(&mut self, pos: u64, iv: &[u8], data: &[u8]) -> Result<usize, IO::Error>
     where
         IO: Write,
     {
-        let pos = self.io.stream_position()?;
         let offset = self.align(pos);
 
         self.io.seek(SeekFrom::Start(offset))?;
 
         self.io.write(&iv)?;
-        self.io.write(&data)?;
 
-        Ok(())
+        Ok(self.io.write(&data)?)
     }
 }
 
