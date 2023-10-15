@@ -7,6 +7,7 @@ edition = "2021"
 crypter = { git = "https://github.com/lemosyne/crypter.git" }
 embedded-io = { git = "https://github.com/euugenechou/embedded-io.git" }
 hasher = { git = "https://github.com/lemosyne/hasher.git" }
+hex = "0.4.3"
 khf = { git = "https://github.com/lemosyne/khf.git" }
 kms = { git = "https://github.com/lemosyne/kms.git" }
 persistence = { git = "https://github.com/lemosyne/persistence.git" }

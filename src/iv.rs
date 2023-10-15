@@ -78,14 +78,17 @@ where
                     let key = self.kms.derive(block).map_err(|_| ()).unwrap();
                     let pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
-                    // Calculate the number of bytes we've actually read.
-                    let nbytes = pt.len() - fill;
+                    // Calculate the number of bytes we've actually read and copy those bytes in.
+                    let nbytes = size.min(pt.len() - fill);
+                    if nbytes == 0 {
+                        break;
+                    }
+
+                    buf[total..total + nbytes].copy_from_slice(&pt[fill..fill + nbytes]);
+
                     size -= nbytes;
                     offset += nbytes;
                     total += nbytes;
-
-                    // Copy in the decrypted bytes after the fill bytes.
-                    buf[total..total + nbytes].copy_from_slice(&pt[fill..fill + nbytes]);
                 }
                 Block::Aligned { iv, data } => {
                     let block = self.io.curr_block(offset as u64);
@@ -94,18 +97,23 @@ where
                     let key = self.kms.derive(block).map_err(|_| ()).unwrap();
                     let pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
-                    // Calculate the number of bytes we've actually read.
-                    size -= pt.len();
-                    offset += pt.len();
-                    total += pt.len();
-
                     // Copy in the decrypted bytes.
-                    buf[total..total + pt.len()].copy_from_slice(&pt[..]);
+                    let nbytes = size.min(pt.len());
+                    if nbytes == 0 {
+                        break;
+                    }
+
+                    buf[total..total + nbytes].copy_from_slice(&pt[..nbytes]);
+
+                    size -= nbytes;
+                    offset += nbytes;
+                    total += nbytes;
                 }
             }
         }
 
-        // Return the total number of bytes read.
+        self.io.seek(SeekFrom::Start(origin + total as u64))?;
+
         Ok(total)
     }
 }
@@ -130,8 +138,9 @@ where
         // offset in the block.
         if !self.io.is_aligned(offset as u64) {
             match self.io.read_block(offset as u64)? {
+                // There should be something there, but we didn't read anything.
                 Block::Empty => {
-                    // There should be something there, but we didn't read anything.
+                    self.io.seek(SeekFrom::Start(origin))?;
                     return Ok(total);
                 }
                 Block::Unaligned { iv, data, fill } => {
@@ -141,10 +150,15 @@ where
                     let key = self.kms.derive(block).map_err(|_| ()).unwrap();
                     let mut pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
 
+                    // Extending the plaintext to a full block covers the case when what we are
+                    // overwriting with is longer than what is currently in the block. If we don't
+                    // do this, the `.copy_from_slice()` won't work.
+                    pt.extend(vec![0; BLK_SZ - pt.len()]);
+
                     // Calculate the number of bytes we've actually read and update the bytes we're
                     // trying to overwrite in the plaintext.
-                    let nbytes = pt.len() - fill;
-                    pt[fill..fill + nbytes].copy_from_slice(&buf[..nbytes]);
+                    let rest = size.min(pt.len() - fill);
+                    pt[fill..fill + rest].copy_from_slice(&buf[..rest]);
 
                     // Re-encrypt the plaintext.
                     let iv = self.generate_iv();
@@ -152,11 +166,17 @@ where
                     let ct = C::encrypt(&key, &iv, &pt).map_err(|_| ()).unwrap();
 
                     // Write the IV and ciphertext.
-                    self.io.write_block(offset as u64, &iv, &ct)?;
+                    let amount = pt.len().max(fill + rest);
+                    let nbytes = self.io.write_block(offset as u64, &iv, &ct[..amount])?;
+                    let written = rest.min(nbytes - fill);
+                    if nbytes == 0 || written == 0 {
+                        self.io.seek(SeekFrom::Start(origin))?;
+                        return Ok(0);
+                    }
 
-                    size -= nbytes;
-                    offset += nbytes;
-                    total += nbytes;
+                    size -= written;
+                    offset += written;
+                    total += written;
                 }
                 _ => {
                     panic!("shouldn't have gotten a block-aligned read")
@@ -177,6 +197,10 @@ where
 
             // Write the IV and ciphertext.
             let nbytes = self.io.write_block(offset as u64, &iv, &ct)?;
+            if nbytes == 0 {
+                self.io.seek(SeekFrom::Start(origin + total as u64))?;
+                return Ok(total);
+            }
 
             total += nbytes;
             offset += nbytes;
@@ -194,7 +218,7 @@ where
                     // Encrypt the remaining bytes.
                     let iv = self.generate_iv();
                     let key = self.kms.update(block).map_err(|_| ()).unwrap();
-                    let mut ct = C::encrypt(&key, &iv, &buf[total..total + size])
+                    let ct = C::encrypt(&key, &iv, &buf[total..total + size])
                         .map_err(|_| ())
                         .unwrap();
 
@@ -218,11 +242,18 @@ where
                     let ct = C::encrypt(&key, &iv, &pt).map_err(|_| ()).unwrap();
 
                     // Write the block.
-                    total += self.io.write_block(offset as u64, &iv, &ct)?;
+                    let nbytes = size.max(pt.len());
+                    self.io.write_block(offset as u64, &iv, &ct[..nbytes])?;
+
+                    total += size.min(nbytes);
                 }
-                _ => {}
+                _ => {
+                    panic!("shouldn't be performing an unaligned write");
+                }
             }
         }
+
+        self.io.seek(SeekFrom::Start(origin + total as u64))?;
 
         Ok(total)
     }
@@ -257,8 +288,36 @@ mod tests {
     use rand::rngs::ThreadRng;
     use tempfile::NamedTempFile;
 
-    const BLOCK_SIZE: usize = 4096;
+    const BLOCK_SIZE: usize = 128;
     const KEY_SIZE: usize = SHA3_256_MD_SIZE;
+
+    #[test]
+    fn simple() -> Result<()> {
+        let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
+        let mut blockio = BlockIvCryptoIo::<
+            FromStd<NamedTempFile>,
+            Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+            ThreadRng,
+            Aes256Ctr,
+            BLOCK_SIZE,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(NamedTempFile::new()?),
+            &mut khf,
+            ThreadRng::default(),
+        );
+
+        blockio.write_all(&['a' as u8; BLOCK_SIZE])?;
+
+        let mut buf = vec![0; BLOCK_SIZE];
+        blockio.seek(SeekFrom::Start(0))?;
+        blockio.read_exact(&mut buf)?;
+
+        assert_eq!(&buf[..], &['a' as u8; BLOCK_SIZE]);
+
+        Ok(())
+    }
 
     // Writes 4 blocks of 'a's, then 4 'b's at offset 3.
     #[test]

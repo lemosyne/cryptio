@@ -62,7 +62,7 @@ where
 
     /// Returns the distance, in bytes, from `offset` to the IV at the start of the block.
     fn fill(&self, offset: u64) -> u64 {
-        offset - self.padding(offset)
+        offset - (self.curr_block(offset) * self.block_size as u64)
     }
 
     // Extracts out the IV.
@@ -85,7 +85,7 @@ where
         let nbytes = self.io.read(&mut raw)?;
 
         // Restore seek cursor if we didn't read anything.
-        if nbytes == 0 || nbytes - padding as usize - self.iv_len == 0 {
+        if nbytes == 0 || nbytes < padding as usize + self.iv_len {
             self.io.seek(SeekFrom::Start(pos))?;
             return Ok(Block::Empty);
         }
@@ -93,6 +93,13 @@ where
         raw.truncate(nbytes);
 
         let (iv, data) = self.extract_iv(raw);
+
+        // eprintln!(
+        //     "rblock: block={}, iv={}, data={}",
+        //     self.curr_block(offset),
+        //     hex::encode(&iv),
+        //     hex::encode(&data)
+        // );
 
         if padding != 0 {
             Ok(Block::Unaligned {
@@ -113,6 +120,13 @@ where
         let offset = self.align(pos);
 
         self.io.seek(SeekFrom::Start(offset))?;
+
+        // eprintln!(
+        //     "wblock: block={}, iv={}, data={}",
+        //     self.curr_block(offset),
+        //     hex::encode(&iv),
+        //     hex::encode(&data)
+        // );
 
         self.io.write(&iv)?;
 
