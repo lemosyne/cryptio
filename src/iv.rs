@@ -260,7 +260,7 @@ where
                     let ct = C::encrypt(&key, &iv, &pt).map_err(|_| ()).unwrap();
 
                     // Write the IV and ciphertext.
-                    let amount = pt.len().max(fill + rest);
+                    let amount = data.len().max(fill + rest);
                     let nbytes = self.write_block(offset, &iv, &ct[..amount])?;
                     let written = rest.min(nbytes - fill);
                     if nbytes == 0 || written == 0 {
@@ -369,6 +369,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File};
+
     use super::*;
     use anyhow::Result;
     use crypter::openssl::Aes256Ctr;
@@ -575,6 +577,78 @@ mod tests {
             assert_eq!(n, pt.len());
             assert_eq!(pt, xt);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn sequential() -> Result<()> {
+        for _ in 0..10 {
+            let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
+            let mut blockio = BlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+                ThreadRng,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(
+                FromStd::new(NamedTempFile::new()?),
+                &mut khf,
+                ThreadRng::default(),
+            );
+
+            let mut rng = ThreadRng::default();
+            let mut pt = vec![0; BLOCK_SIZE];
+            rng.fill_bytes(&mut pt);
+
+            blockio.write_all(&pt)?;
+
+            blockio.seek(SeekFrom::Start(0).into())?;
+            let mut xt = [0];
+
+            for c in &pt {
+                let n = blockio.read(&mut xt)?;
+                assert_eq!(n, 1);
+                assert_eq!(*c, xt[0]);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn correctness() -> Result<()> {
+        let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
+        let mut blockio = BlockIvCryptIo::<
+            FromStd<File>,
+            Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+            ThreadRng,
+            Aes256Ctr,
+            BLOCK_SIZE,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open("/tmp/blockivcrypt")?,
+            ),
+            &mut khf,
+            ThreadRng::default(),
+        );
+
+        let mut n = 0;
+        blockio.seek(SeekFrom::Start(0).into())?;
+        n += blockio.write(&['a' as u8; 7])?;
+        blockio.seek(SeekFrom::Start(7).into())?;
+        n += blockio.write(&['b' as u8; 29])?;
+        assert_eq!(n, 36);
+        assert_eq!(fs::metadata("/tmp/blockivcrypt")?.len(), 52);
 
         Ok(())
     }
