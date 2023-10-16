@@ -21,7 +21,7 @@ pub enum Block {
     },
 }
 
-pub struct BlockIvCryptoIo<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> {
+pub struct BlockIvCryptIo<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> {
     io: IO,
     kms: &'a mut KMS,
     rng: R,
@@ -29,7 +29,7 @@ pub struct BlockIvCryptoIo<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ:
 }
 
 impl<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize>
-    BlockIvCryptoIo<'a, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+    BlockIvCryptIo<'a, IO, KMS, R, C, BLK_SZ, KEY_SZ>
 where
     IO: Seek,
     R: RngCore + CryptoRng,
@@ -136,7 +136,7 @@ where
 }
 
 impl<IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> Io
-    for BlockIvCryptoIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+    for BlockIvCryptIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
 where
     IO: Io,
 {
@@ -144,7 +144,7 @@ where
 }
 
 impl<IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> Read
-    for BlockIvCryptoIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+    for BlockIvCryptIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
 where
     IO: Read + Seek,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
@@ -213,7 +213,7 @@ where
 }
 
 impl<IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> Write
-    for BlockIvCryptoIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+    for BlockIvCryptIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
 where
     IO: Read + Write + Seek,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
@@ -358,7 +358,7 @@ where
 }
 
 impl<IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> Seek
-    for BlockIvCryptoIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+    for BlockIvCryptIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
 where
     IO: Seek,
 {
@@ -389,7 +389,7 @@ mod tests {
     fn simple() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
 
-        let mut blockio = BlockIvCryptoIo::<
+        let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
@@ -418,7 +418,7 @@ mod tests {
     fn offset_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
 
-        let mut blockio = BlockIvCryptoIo::<
+        let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
@@ -451,7 +451,7 @@ mod tests {
     fn misaligned_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
 
-        let mut blockio = BlockIvCryptoIo::<
+        let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
@@ -489,7 +489,7 @@ mod tests {
     fn short_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
 
-        let mut blockio = BlockIvCryptoIo::<
+        let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
@@ -518,7 +518,7 @@ mod tests {
     fn read_too_much() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
 
-        let mut blockio = BlockIvCryptoIo::<
+        let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
