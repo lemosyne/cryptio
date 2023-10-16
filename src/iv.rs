@@ -379,7 +379,7 @@ mod tests {
     };
     use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
     use khf::Khf;
-    use rand::rngs::ThreadRng;
+    use rand::{rngs::ThreadRng, Rng};
     use tempfile::NamedTempFile;
 
     const BLOCK_SIZE: usize = 128;
@@ -539,6 +539,42 @@ mod tests {
 
         assert_eq!(n, 16);
         assert_eq!(&buf[..n], &['a' as u8; 16]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn random() -> Result<()> {
+        for _ in 0..20 {
+            let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
+            let mut blockio = BlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+                ThreadRng,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(
+                FromStd::new(NamedTempFile::new()?),
+                &mut khf,
+                ThreadRng::default(),
+            );
+
+            let mut rng = ThreadRng::default();
+            let nbytes = rng.gen::<usize>() % (1 << 16);
+            let mut pt = vec![0; nbytes];
+            rng.fill_bytes(&mut pt);
+
+            blockio.write_all(&pt)?;
+
+            let mut xt = vec![0; pt.len()];
+            blockio.seek(SeekFrom::Start(0).into())?;
+            let n = blockio.read(&mut xt)?;
+
+            assert_eq!(n, pt.len());
+            assert_eq!(pt, xt);
+        }
 
         Ok(())
     }
