@@ -1,12 +1,155 @@
 use crate::Key;
 use crypter::Crypter;
 use embedded_io::{
-    blocking::{Read, Seek, Write},
+    blocking::{Read, ReadExactError, Seek, Write},
     Io, SeekFrom,
 };
 use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use std::marker::PhantomData;
+
+/// You should probably only use this writing or reading
+/// the entiriety of IO (or with a BufReader),
+/// as it uses one IV and thus usually requires a full read/write anyways
+pub struct IvCryptIo<IO, R, C, const KEY_SZ: usize> {
+    pub io: IO,
+    key: Key<KEY_SZ>,
+    rng: R,
+    pd: PhantomData<C>,
+}
+
+impl<IO, R, C, const KEY_SZ: usize> IvCryptIo<IO, R, C, KEY_SZ> {
+    pub fn new(io: IO, key: Key<KEY_SZ>, rng: R) -> Self {
+        Self {
+            io,
+            key,
+            rng,
+            pd: PhantomData,
+        }
+    }
+}
+
+impl<IO: Io, R, C, const KEY_SZ: usize> Io for IvCryptIo<IO, R, C, KEY_SZ> {
+    type Error = IO::Error;
+}
+
+impl<IO, R, C, const KEY_SZ: usize> Read for IvCryptIo<IO, R, C, KEY_SZ>
+where
+    C: Crypter,
+    IO: Read + Seek,
+{
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IO::Error> {
+        let start_pos = self.io.stream_position()?;
+
+        // Read the current iv
+        let mut iv = Vec::with_capacity(C::iv_length());
+        self.io.seek(SeekFrom::Start(0))?;
+        match self.io.read_exact(&mut iv) {
+            Ok(()) => {}
+            Err(ReadExactError::Other(e)) => return Err(e),
+            Err(_) => {
+                self.io.seek(SeekFrom::Start(start_pos))?;
+                return Ok(0);
+            }
+        };
+
+        // Read the desired data's ciphertext
+        // TODO: verify that this is correct, maybe decrypt could require
+        // more than buf.len() bytes or produce a smaller plaintext
+        self.io.seek(SeekFrom::Start(start_pos))?;
+        let n = self.io.read(buf)?;
+
+        // Decrypt the ciphertext and copy it back into buf
+        let plaintext = C::decrypt(&self.key, &iv, buf).map_err(|_| ()).unwrap();
+        buf.copy_from_slice(&plaintext);
+
+        Ok(n)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize, Self::Error> {
+        // Read the complete iv + ciphertext
+        let cn = self.io.read_to_end(buf)?;
+        if cn < C::iv_length() {
+            return Ok(0);
+        }
+
+        // Decrypt it
+        let iv = buf[..C::iv_length()].to_vec();
+        let plaintext = C::decrypt(&self.key, &iv, &mut buf[C::iv_length()..])
+            .map_err(|_| ())
+            .unwrap();
+
+        // Copy the plaintext back into buf
+        *buf = plaintext;
+
+        Ok(buf.len())
+    }
+}
+
+impl<IO, R, C, const KEY_SZ: usize> Write for IvCryptIo<IO, R, C, KEY_SZ>
+where
+    R: CryptoRng + RngCore,
+    C: Crypter,
+    IO: Write + Read + Seek,
+{
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        // TODO: this implementation is lazzzzy
+
+        let start_pos = self.io.stream_position()?;
+
+        // Read the currently existent iv + ciphertext
+        self.io.seek(SeekFrom::Start(0))?;
+        let mut data = Vec::new();
+        let cn = self.io.read_to_end(&mut data)?;
+
+        let mut plaintext_b;
+        let plaintext = {
+            // If the initial file was too empty, then the plaintext is just buf
+            if cn <= C::iv_length() {
+                buf
+            } else {
+                // Otherwise, decrypt the ciphertext
+                plaintext_b = C::decrypt(&self.key, &data[..C::iv_length()], &data[C::iv_length()..])
+                    .map_err(|_| ())
+                    .unwrap();
+
+                // And substitute in the to-be-written data
+                let sub_end = plaintext_b.len().max(start_pos as usize + buf.len());
+                let diff = sub_end - start_pos as usize;
+                plaintext_b[start_pos as usize..sub_end].copy_from_slice(&buf[..diff]);
+                plaintext_b.extend(&buf[diff..]);
+
+                &plaintext_b
+            }
+        };
+
+        // Write the new iv
+        let mut new_iv = vec![0; C::iv_length()];
+        self.rng.fill_bytes(&mut new_iv);
+    
+        self.io.seek(SeekFrom::Start(0))?;
+        self.io.write_all(&new_iv)?;
+
+        // Write the new ciphertext
+        let ciphertext = C::encrypt(&self.key, &new_iv, &plaintext).map_err(|_| ()).unwrap();
+        self.io.write_all(&ciphertext)?;
+
+        Ok(buf.len())
+    }
+    
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.io.flush()
+    }
+}
+
+impl<IO, R, C, const KEY_SZ: usize> Seek for IvCryptIo<IO, R, C, KEY_SZ>
+where
+    IO: Seek,
+{
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
+        self.io.seek(pos)
+    }
+}
 
 pub enum Block {
     Empty,
