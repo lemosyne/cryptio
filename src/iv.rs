@@ -109,9 +109,10 @@ where
                 buf
             } else {
                 // Otherwise, decrypt the ciphertext
-                plaintext_b = C::decrypt(&self.key, &data[..C::iv_length()], &data[C::iv_length()..])
-                    .map_err(|_| ())
-                    .unwrap();
+                plaintext_b =
+                    C::decrypt(&self.key, &data[..C::iv_length()], &data[C::iv_length()..])
+                        .map_err(|_| ())
+                        .unwrap();
 
                 // And substitute in the to-be-written data
                 let sub_end = plaintext_b.len().max(start_pos as usize + buf.len());
@@ -126,17 +127,19 @@ where
         // Write the new iv
         let mut new_iv = vec![0; C::iv_length()];
         self.rng.fill_bytes(&mut new_iv);
-    
+
         self.io.seek(SeekFrom::Start(0))?;
         self.io.write_all(&new_iv)?;
 
         // Write the new ciphertext
-        let ciphertext = C::encrypt(&self.key, &new_iv, &plaintext).map_err(|_| ()).unwrap();
+        let ciphertext = C::encrypt(&self.key, &new_iv, &plaintext)
+            .map_err(|_| ())
+            .unwrap();
         self.io.write_all(&ciphertext)?;
 
         Ok(buf.len())
     }
-    
+
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.io.flush()
     }
@@ -792,6 +795,48 @@ mod tests {
         n += blockio.write(&['b' as u8; 29])?;
         assert_eq!(n, 36);
         assert_eq!(fs::metadata("/tmp/blockivcrypt")?.len(), 52);
+
+        Ok(())
+    }
+
+    #[test]
+    fn short() -> Result<()> {
+        let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+
+        let mut blockio = BlockIvCryptIo::<
+            FromStd<File>,
+            Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+            ThreadRng,
+            Aes256Ctr,
+            BLOCK_SIZE,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open("/tmp/blockivcrypt_short")?,
+            ),
+            &mut khf,
+            ThreadRng::default(),
+        );
+
+        blockio.seek(SeekFrom::Start(0).into())?;
+        let n = blockio.write(&['a' as u8; 24])?;
+        blockio.seek(SeekFrom::Start(0).into())?;
+
+        let mut data = vec![0; 400];
+        let m = blockio.read(&mut data)?;
+
+        assert_eq!(n, 24);
+        assert_eq!(m, 24);
+        assert_eq!(&data[..n], &['a' as u8; 24]);
+        assert_eq!(
+            fs::metadata("/tmp/blockivcrypt_short")?.len(),
+            m as u64 + Aes256Ctr::iv_length() as u64
+        );
 
         Ok(())
     }
