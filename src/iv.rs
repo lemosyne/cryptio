@@ -78,11 +78,15 @@ where
         }
 
         // Decrypt it
-        let iv = buf[..C::iv_length()].to_vec();
+        let (iv, data) = buf.split_at_mut(C::iv_length());
+
         self.crypter
-            .decrypt(&self.key, &iv, &mut buf[C::iv_length()..])
+            .decrypt(&self.key, iv, data)
             .map_err(|_| ())
             .unwrap();
+
+        // Drop the leading IV.
+        buf.drain(..C::iv_length());
 
         Ok(buf.len())
     }
@@ -378,143 +382,143 @@ where
         let mut scratch = vec![0; self.padded_block_size()];
         let mut scratch_block = vec![0; BLK_SZ];
 
-        // If we aren't block-aligned, then we need to rewrite the bytes preceding our current
-        // offset in the block.
-        if !self.offset_is_aligned(offset) {
-            match self.read_block(offset, &mut scratch)? {
-                // There should be something there, but we didn't read anything.
-                Block::Empty => {
-                    self.io.seek(SeekFrom::Start(origin as u64))?;
+        while size > 0 {
+            // If we aren't block-aligned, then we need to rewrite the bytes preceding our current
+            // offset in the block.
+            if !self.offset_is_aligned(offset) {
+                match self.read_block(offset, &mut scratch)? {
+                    // There should be something there, but we didn't read anything.
+                    Block::Empty => {
+                        self.io.seek(SeekFrom::Start(origin as u64))?;
+                        return Ok(total);
+                    }
+                    Block::Unaligned { real, fill } => {
+                        let block = self.offset_block(offset);
+                        let (iv, data) = scratch.split_at_mut(C::iv_length());
+
+                        // Decrypt the bytes we read.
+                        let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
+                        self.crypter
+                            .decrypt(&key, iv, &mut data[..real])
+                            .map_err(|_| ())
+                            .unwrap();
+
+                        // Add in the bytes that we're writing, up until a block boundary.
+                        let rest = size.min(data.len() - fill);
+                        data[fill..fill + rest].copy_from_slice(&buf[total..total + rest]);
+
+                        // Generate a new IV.
+                        self.rng.fill_bytes(iv);
+                        let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
+                        self.crypter
+                            .encrypt(&key, iv, data)
+                            .map_err(|_| ())
+                            .unwrap();
+
+                        // Write the IV and ciphertext.
+                        // The amount of bytes could exceed what was there originally (real).
+                        let amount = real.max(fill + rest);
+                        let nbytes = self.write_block(offset, &iv, &data[..amount])?;
+                        let written = rest.min(nbytes - fill);
+                        if nbytes == 0 || written == 0 {
+                            self.io.seek(SeekFrom::Start(origin as u64))?;
+                            return Ok(0);
+                        }
+
+                        size -= written;
+                        offset += written;
+                        total += written;
+                    }
+                    _ => {
+                        panic!("shouldn't have gotten a block-aligned read")
+                    }
+                }
+            } else if size > BLK_SZ {
+                let block = self.offset_block(offset);
+                let (iv, _data) = scratch.split_at_mut(C::iv_length());
+
+                // Copy data to a scratch block buffer for encryption.
+                scratch_block.copy_from_slice(&buf[total..total + BLK_SZ]);
+
+                // Encrypt the data with a new IV.
+                self.rng.fill_bytes(iv);
+                let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
+                self.crypter
+                    .encrypt(&key, &iv, &mut scratch_block)
+                    .map_err(|_| ())
+                    .unwrap();
+
+                // Write the IV and ciphertext.
+                let nbytes = self.write_block(offset, iv, &scratch_block)?;
+                if nbytes == 0 {
+                    self.io.seek(SeekFrom::Start((origin + total) as u64))?;
                     return Ok(total);
                 }
-                Block::Unaligned { real, fill } => {
-                    let block = self.offset_block(offset);
-                    let (iv, data) = scratch.split_at_mut(C::iv_length());
 
-                    // Decrypt the bytes we read.
-                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-                    self.crypter
-                        .decrypt(&key, iv, &mut data[..real])
-                        .map_err(|_| ())
-                        .unwrap();
+                total += nbytes;
+                offset += nbytes;
+                size -= nbytes;
+            } else {
+                match self.read_block(offset, &mut scratch)? {
+                    // Receiving block empty means that there aren't any trailing bytes that we need to
+                    // rewrite, so we can just go ahead and write out the remaining bytes.
+                    Block::Empty => {
+                        let block = self.offset_block(offset);
+                        let (iv, _data) = scratch.split_at_mut(C::iv_length());
 
-                    // Add in the bytes that we're writing, up until a block boundary.
-                    let rest = size.min(data.len() - fill);
-                    data[fill..fill + rest].copy_from_slice(&buf[total..total + rest]);
+                        // Copy over the bytes to the scratch buffer for encryption.
+                        scratch_block[..size].copy_from_slice(&buf[total..total + size]);
 
-                    // Generate a new IV.
-                    self.rng.fill_bytes(iv);
-                    let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
-                    self.crypter
-                        .encrypt(&key, iv, data)
-                        .map_err(|_| ())
-                        .unwrap();
+                        // Encrypt the remaining bytes.
+                        self.rng.fill_bytes(iv);
+                        let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
 
-                    // Write the IV and ciphertext.
-                    // The amount of bytes could exceed what was there originally (real).
-                    let amount = real.max(fill + rest);
-                    let nbytes = self.write_block(offset, &iv, &data[..amount])?;
-                    let written = rest.min(nbytes - fill);
-                    if nbytes == 0 || written == 0 {
-                        self.io.seek(SeekFrom::Start(origin as u64))?;
-                        return Ok(0);
+                        self.crypter
+                            .encrypt(&key, iv, &mut scratch_block[..size])
+                            .map_err(|_| ())
+                            .unwrap();
+
+                        // Write the block.
+                        let nbytes = self.write_block(offset, iv, &scratch_block[..size])?;
+
+                        total += nbytes;
+                        size -= nbytes;
                     }
+                    // We need to rewrite any bytes trailing the overwritten bytes.
+                    Block::Aligned { real } => {
+                        let block = self.offset_block(offset);
+                        let (iv, data) = scratch.split_at_mut(C::iv_length());
 
-                    size -= written;
-                    offset += written;
-                    total += written;
-                }
-                _ => {
-                    panic!("shouldn't have gotten a block-aligned read")
-                }
-            }
-        }
+                        // Decrypt the bytes.
+                        let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
 
-        // We write full blocks of data as long as we're block-aligned.
-        while size > 0 && size / BLK_SZ > 0 && self.offset_is_aligned(offset) {
-            let block = self.offset_block(offset);
-            let (iv, _data) = scratch.split_at_mut(C::iv_length());
+                        self.crypter
+                            .decrypt(&key, iv, data)
+                            .map_err(|_| ())
+                            .unwrap();
 
-            // Copy data to a scratch block buffer for encryption.
-            scratch_block.copy_from_slice(&buf[total..total + BLK_SZ]);
+                        // Copy in the bytes that we want to update.
+                        data[..size].copy_from_slice(&buf[total..total + size]);
 
-            // Encrypt the data with a new IV.
-            self.rng.fill_bytes(iv);
-            let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
-            self.crypter
-                .encrypt(&key, &iv, &mut scratch_block)
-                .map_err(|_| ())
-                .unwrap();
+                        // Encrypt the plaintext.
+                        self.rng.fill_bytes(iv);
+                        let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
 
-            // Write the IV and ciphertext.
-            let nbytes = self.write_block(offset, iv, &scratch_block)?;
-            if nbytes == 0 {
-                self.io.seek(SeekFrom::Start((origin + total) as u64))?;
-                return Ok(total);
-            }
+                        self.crypter
+                            .encrypt(&key, iv, data)
+                            .map_err(|_| ())
+                            .unwrap();
 
-            total += nbytes;
-            offset += nbytes;
-            size -= nbytes;
-        }
+                        // Write the block.
+                        let nbytes = size.max(real);
+                        self.write_block(offset, iv, &data[..nbytes])?;
 
-        // We have remaining bytes that don't fill an entire block.
-        if size > 0 {
-            match self.read_block(offset, &mut scratch)? {
-                // Receiving block empty means that there aren't any trailing bytes that we need to
-                // rewrite, so we can just go ahead and write out the remaining bytes.
-                Block::Empty => {
-                    let block = self.offset_block(offset);
-                    let (iv, _data) = scratch.split_at_mut(C::iv_length());
-
-                    // Copy over the bytes to the scratch buffer for encryption.
-                    scratch_block[..size].copy_from_slice(&buf[total..total + size]);
-
-                    // Encrypt the remaining bytes.
-                    self.rng.fill_bytes(iv);
-                    let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
-
-                    self.crypter
-                        .encrypt(&key, iv, &mut scratch_block[..size])
-                        .map_err(|_| ())
-                        .unwrap();
-
-                    // Write the block.
-                    total += self.write_block(offset, iv, &scratch_block[..size])?;
-                }
-                // We need to rewrite any bytes trailing the overwritten bytes.
-                Block::Aligned { real } => {
-                    let block = self.offset_block(offset);
-                    let (iv, data) = scratch.split_at_mut(C::iv_length());
-
-                    // Decrypt the bytes.
-                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-
-                    self.crypter
-                        .decrypt(&key, iv, data)
-                        .map_err(|_| ())
-                        .unwrap();
-
-                    // Copy in the bytes that we want to update.
-                    data[..size].copy_from_slice(&buf[total..total + size]);
-
-                    // Encrypt the plaintext.
-                    self.rng.fill_bytes(iv);
-                    let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
-
-                    self.crypter
-                        .encrypt(&key, iv, data)
-                        .map_err(|_| ())
-                        .unwrap();
-
-                    // Write the block.
-                    let nbytes = size.max(real);
-                    self.write_block(offset, iv, &data[..nbytes])?;
-
-                    total += size.min(nbytes);
-                }
-                _ => {
-                    panic!("shouldn't be performing an unaligned write");
+                        total += size.min(nbytes);
+                        size -= size.min(nbytes);
+                    }
+                    _ => {
+                        panic!("shouldn't be performing an unaligned write");
+                    }
                 }
             }
         }
