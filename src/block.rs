@@ -17,7 +17,7 @@ pub struct BlockIvCryptIo<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: 
     io: IO,
     kms: &'a mut KMS,
     rng: R,
-    crypter: C,
+    crypter: &'a mut C,
 }
 
 impl<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize>
@@ -28,7 +28,7 @@ where
     C: StatefulCrypter,
 {
     /// Constructs a new `BlockIvCryptoIo`.
-    pub fn new(io: IO, kms: &'a mut KMS, rng: R) -> Self
+    pub fn new(io: IO, kms: &'a mut KMS, rng: R, crypter: &'a mut C) -> Self
     where
         C: Default,
     {
@@ -36,7 +36,7 @@ where
             io,
             kms,
             rng,
-            crypter: C::default(),
+            crypter,
         }
     }
 
@@ -411,6 +411,7 @@ mod tests {
     #[test]
     fn simple() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
@@ -423,6 +424,7 @@ mod tests {
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
             ThreadRng::default(),
+            &mut crypter,
         );
 
         blockio.write_all(&['a' as u8; BLOCK_SIZE])?;
@@ -440,6 +442,7 @@ mod tests {
     #[test]
     fn offset_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
@@ -452,6 +455,7 @@ mod tests {
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
             ThreadRng::default(),
+            &mut crypter,
         );
 
         blockio.write_all(&['a' as u8; 4 * BLOCK_SIZE])?;
@@ -473,6 +477,7 @@ mod tests {
     #[test]
     fn misaligned_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
@@ -485,6 +490,7 @@ mod tests {
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
             ThreadRng::default(),
+            &mut crypter,
         );
 
         blockio.write_all(&['a' as u8; 2 * BLOCK_SIZE])?;
@@ -511,6 +517,7 @@ mod tests {
     #[test]
     fn short_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
@@ -523,6 +530,7 @@ mod tests {
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
             ThreadRng::default(),
+            &mut crypter,
         );
 
         blockio.write_all(&['a' as u8])?;
@@ -540,6 +548,7 @@ mod tests {
     #[test]
     fn read_too_much() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
@@ -552,6 +561,7 @@ mod tests {
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
             ThreadRng::default(),
+            &mut crypter,
         );
 
         blockio.write_all(&['a' as u8; 16])?;
@@ -570,6 +580,7 @@ mod tests {
     fn random() -> Result<()> {
         for _ in 0..20 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+            let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
                 FromStd<NamedTempFile>,
@@ -582,6 +593,7 @@ mod tests {
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
                 ThreadRng::default(),
+                &mut crypter,
             );
 
             let mut rng = ThreadRng::default();
@@ -606,6 +618,7 @@ mod tests {
     fn sequential() -> Result<()> {
         for _ in 0..10 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+            let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
                 FromStd<NamedTempFile>,
@@ -618,6 +631,7 @@ mod tests {
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
                 ThreadRng::default(),
+                &mut crypter,
             );
 
             let mut rng = ThreadRng::default();
@@ -642,6 +656,7 @@ mod tests {
     #[test]
     fn correctness() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<File>,
@@ -661,6 +676,7 @@ mod tests {
             ),
             &mut khf,
             ThreadRng::default(),
+            &mut crypter,
         );
 
         let mut n = 0;
@@ -677,6 +693,7 @@ mod tests {
     #[test]
     fn short() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<File>,
@@ -696,6 +713,7 @@ mod tests {
             ),
             &mut khf,
             ThreadRng::default(),
+            &mut crypter,
         );
 
         blockio.seek(SeekFrom::Start(0).into())?;

@@ -12,19 +12,19 @@ pub enum Block {
     Aligned { real: usize },
 }
 
-pub struct IvCryptIo<IO, R, C, const KEY_SZ: usize> {
+pub struct IvCryptIo<'a, IO, R, C, const KEY_SZ: usize> {
     pub io: IO,
     key: Key<KEY_SZ>,
     rng: R,
-    crypter: C,
+    crypter: &'a mut C,
 }
 
-impl<IO, R, C, const KEY_SZ: usize> IvCryptIo<IO, R, C, KEY_SZ>
+impl<'a, IO, R, C, const KEY_SZ: usize> IvCryptIo<'a, IO, R, C, KEY_SZ>
 where
     IO: Seek,
     C: StatefulCrypter,
 {
-    pub fn new(io: IO, key: Key<KEY_SZ>, rng: R) -> Self
+    pub fn new(io: IO, key: Key<KEY_SZ>, rng: R, crypter: &'a mut C) -> Self
     where
         C: Default,
     {
@@ -32,7 +32,7 @@ where
             io,
             key,
             rng,
-            crypter: C::default(),
+            crypter,
         }
     }
 
@@ -112,11 +112,11 @@ where
     }
 }
 
-impl<IO: Io, R, C, const KEY_SZ: usize> Io for IvCryptIo<IO, R, C, KEY_SZ> {
+impl<'a, IO: Io, R, C, const KEY_SZ: usize> Io for IvCryptIo<'a, IO, R, C, KEY_SZ> {
     type Error = IO::Error;
 }
 
-impl<IO, R, C, const KEY_SZ: usize> Read for IvCryptIo<IO, R, C, KEY_SZ>
+impl<'a, IO, R, C, const KEY_SZ: usize> Read for IvCryptIo<'a, IO, R, C, KEY_SZ>
 where
     IO: Read + Seek,
     R: RngCore + CryptoRng,
@@ -188,7 +188,7 @@ where
     }
 }
 
-impl<IO, R, C, const KEY_SZ: usize> Write for IvCryptIo<IO, R, C, KEY_SZ>
+impl<'a, IO, R, C, const KEY_SZ: usize> Write for IvCryptIo<'a, IO, R, C, KEY_SZ>
 where
     IO: Read + Write + Seek,
     R: RngCore + CryptoRng,
@@ -348,7 +348,7 @@ where
     }
 }
 
-impl<IO, R, C, const KEY_SZ: usize> Seek for IvCryptIo<IO, R, C, KEY_SZ>
+impl<'a, IO, R, C, const KEY_SZ: usize> Seek for IvCryptIo<'a, IO, R, C, KEY_SZ>
 where
     IO: Seek,
 {
@@ -379,11 +379,14 @@ mod tests {
         let mut key = [0; KEY_SIZE];
         rng.fill_bytes(&mut key);
 
+        let mut crypter = StatefulAes256Ctr::new();
+
         let mut io =
             IvCryptIo::<FromStd<NamedTempFile>, ThreadRng, StatefulAes256Ctr, KEY_SIZE>::new(
                 FromStd::new(NamedTempFile::new()?),
                 key,
                 rng,
+                &mut crypter,
             );
 
         let data1 = vec!['a' as u8; 8192];
