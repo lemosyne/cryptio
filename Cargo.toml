@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-crypter = { git = "https://github.com/lemosyne/crypter.git" }
+crypter = { git = "https://github.com/lemosyne/crypter.git", branch = "stateful" }
 embedded-io = { git = "https://github.com/euugenechou/embedded-io.git" }
 hasher = { git = "https://github.com/lemosyne/hasher.git" }
 hex = "0.4.3"
@@ -15,7 +15,7 @@ rand = "0.8.5"
 
 [dev-dependencies]
 anyhow = "1.0.71"
-crypter = { git = "https://github.com/lemosyne/crypter.git", features = ["openssl"] }
+crypter = { git = "https://github.com/lemosyne/crypter.git", branch = "stateful", features = ["openssl"] }
 embedded-io = { git = "https://github.com/euugenechou/embedded-io.git", features = ["std"] }
 hasher = { git = "https://github.com/lemosyne/hasher.git", features = ["openssl"] }
 path_macro = "1.0.0"

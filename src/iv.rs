@@ -1,12 +1,11 @@
 use crate::Key;
-use crypter::Crypter;
+use crypter::StatefulCrypter;
 use embedded_io::{
     blocking::{Read, ReadExactError, Seek, Write},
     Io, SeekFrom,
 };
 use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
-use std::marker::PhantomData;
 
 /// You should probably only use this writing or reading
 /// the entiriety of IO (or with a BufReader),
@@ -15,16 +14,19 @@ pub struct IvCryptIo<IO, R, C, const KEY_SZ: usize> {
     pub io: IO,
     key: Key<KEY_SZ>,
     rng: R,
-    pd: PhantomData<C>,
+    crypter: C,
 }
 
 impl<IO, R, C, const KEY_SZ: usize> IvCryptIo<IO, R, C, KEY_SZ> {
-    pub fn new(io: IO, key: Key<KEY_SZ>, rng: R) -> Self {
+    pub fn new(io: IO, key: Key<KEY_SZ>, rng: R) -> Self
+    where
+        C: Default,
+    {
         Self {
             io,
             key,
             rng,
-            pd: PhantomData,
+            crypter: C::default(),
         }
     }
 }
@@ -35,7 +37,7 @@ impl<IO: Io, R, C, const KEY_SZ: usize> Io for IvCryptIo<IO, R, C, KEY_SZ> {
 
 impl<IO, R, C, const KEY_SZ: usize> Read for IvCryptIo<IO, R, C, KEY_SZ>
 where
-    C: Crypter,
+    C: StatefulCrypter,
     IO: Read + Seek,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, IO::Error> {
@@ -60,8 +62,10 @@ where
         let n = self.io.read(buf)?;
 
         // Decrypt the ciphertext and copy it back into buf
-        let plaintext = C::decrypt(&self.key, &iv, buf).map_err(|_| ()).unwrap();
-        buf.copy_from_slice(&plaintext);
+        self.crypter
+            .decrypt(&self.key, &iv, buf)
+            .map_err(|_| ())
+            .unwrap();
 
         Ok(n)
     }
@@ -75,12 +79,10 @@ where
 
         // Decrypt it
         let iv = buf[..C::iv_length()].to_vec();
-        let plaintext = C::decrypt(&self.key, &iv, &mut buf[C::iv_length()..])
+        self.crypter
+            .decrypt(&self.key, &iv, &mut buf[C::iv_length()..])
             .map_err(|_| ())
             .unwrap();
-
-        // Copy the plaintext back into buf
-        *buf = plaintext;
 
         Ok(buf.len())
     }
@@ -89,7 +91,7 @@ where
 impl<IO, R, C, const KEY_SZ: usize> Write for IvCryptIo<IO, R, C, KEY_SZ>
 where
     R: CryptoRng + RngCore,
-    C: Crypter,
+    C: StatefulCrypter,
     IO: Write + Read + Seek,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
@@ -102,40 +104,42 @@ where
         let mut data = Vec::new();
         let cn = self.io.read_to_end(&mut data)?;
 
-        let mut plaintext_b;
-        let plaintext = {
-            // If the initial file was too empty, then the plaintext is just buf
-            if cn <= C::iv_length() {
-                buf
-            } else {
-                // Otherwise, decrypt the ciphertext
-                plaintext_b =
-                    C::decrypt(&self.key, &data[..C::iv_length()], &data[C::iv_length()..])
-                        .map_err(|_| ())
-                        .unwrap();
-
-                // And substitute in the to-be-written data
-                let sub_end = plaintext_b.len().max(start_pos as usize + buf.len());
-                let diff = sub_end - start_pos as usize;
-                plaintext_b[start_pos as usize..sub_end].copy_from_slice(&buf[..diff]);
-                plaintext_b.extend(&buf[diff..]);
-
-                &plaintext_b
-            }
-        };
-
-        // Write the new iv
+        // Generate new IV.
         let mut new_iv = vec![0; C::iv_length()];
         self.rng.fill_bytes(&mut new_iv);
 
-        self.io.seek(SeekFrom::Start(0))?;
-        self.io.write_all(&new_iv)?;
+        if cn <= C::iv_length() {
+            // If the initial file was too empty, then we just replace it with a new IV and data.
+            data.extend(&new_iv);
+            data.extend(buf);
+        } else {
+            let (iv, content) = data.split_at_mut(C::iv_length());
+
+            // Otherwise, decrypt the ciphertext in place.
+            self.crypter
+                .decrypt(&self.key, iv, content)
+                .map_err(|_| ())
+                .unwrap();
+
+            // And substitute in the to-be-written data
+            let sub_end = data[C::iv_length()..]
+                .len()
+                .max(start_pos as usize + buf.len());
+            let diff = sub_end - start_pos as usize;
+            data[start_pos as usize..sub_end].copy_from_slice(&buf[..diff]);
+            data.extend(&buf[diff..]);
+
+            // Update to the new IV.
+            data[..C::iv_length()].copy_from_slice(&new_iv);
+        }
 
         // Write the new ciphertext
-        let ciphertext = C::encrypt(&self.key, &new_iv, &plaintext)
+        self.io.seek(SeekFrom::Start(0))?;
+        self.crypter
+            .encrypt(&self.key, &new_iv, &mut data)
             .map_err(|_| ())
             .unwrap();
-        self.io.write_all(&ciphertext)?;
+        self.io.write_all(&data)?;
 
         Ok(buf.len())
     }
@@ -156,22 +160,15 @@ where
 
 pub enum Block {
     Empty,
-    Unaligned {
-        iv: Vec<u8>,
-        data: Vec<u8>,
-        fill: usize,
-    },
-    Aligned {
-        iv: Vec<u8>,
-        data: Vec<u8>,
-    },
+    Unaligned { real: usize, fill: usize },
+    Aligned { real: usize },
 }
 
 pub struct BlockIvCryptIo<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> {
     io: IO,
     kms: &'a mut KMS,
     rng: R,
-    pd: PhantomData<C>,
+    crypter: C,
 }
 
 impl<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize>
@@ -179,15 +176,18 @@ impl<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize>
 where
     IO: Seek,
     R: RngCore + CryptoRng,
-    C: Crypter,
+    C: StatefulCrypter,
 {
     /// Constructs a new `BlockIvCryptoIo`.
-    pub fn new(io: IO, kms: &'a mut KMS, rng: R) -> Self {
+    pub fn new(io: IO, kms: &'a mut KMS, rng: R) -> Self
+    where
+        C: Default,
+    {
         Self {
             io,
             kms,
             rng,
-            pd: PhantomData,
+            crypter: C::default(),
         }
     }
 
@@ -221,25 +221,13 @@ where
         offset - (self.offset_block(offset) * BLK_SZ)
     }
 
-    /// Generates a new IV.
-    fn generate_iv(&mut self) -> Vec<u8> {
-        let mut iv = vec![0; C::iv_length()];
-        self.rng.fill_bytes(&mut iv);
-        iv
-    }
-
-    /// Extracts out the IV and data from a raw block.
-    fn extract_iv_data(&self, mut raw: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
-        (raw.drain(..C::iv_length()).collect(), raw)
-    }
-
     /// Returns our current offset.
     fn curr_offset(&mut self) -> Result<usize, IO::Error> {
         self.io.stream_position().map(|offset| offset as usize)
     }
 
     /// Reads a block from a given offset.
-    fn read_block(&mut self, offset: usize) -> Result<Block, IO::Error>
+    fn read_block(&mut self, offset: usize, buf: &mut [u8]) -> Result<Block, IO::Error>
     where
         IO: Read,
     {
@@ -249,8 +237,7 @@ where
 
         self.io.seek(SeekFrom::Start(aligned as u64))?;
 
-        let mut raw = vec![0; self.padded_block_size()];
-        let nbytes = self.io.read(&mut raw)?;
+        let nbytes = self.io.read(buf)?;
 
         // Restore seek cursor if we didn't read anything.
         if nbytes == 0 || nbytes < padding + C::iv_length() {
@@ -258,14 +245,13 @@ where
             return Ok(Block::Empty);
         }
 
-        raw.truncate(nbytes);
-
-        let (iv, data) = self.extract_iv_data(raw);
+        // The real data size (doesn't include IV).
+        let real = nbytes - C::iv_length();
 
         if padding == 0 {
-            Ok(Block::Aligned { iv, data })
+            Ok(Block::Aligned { real })
         } else {
-            Ok(Block::Unaligned { iv, data, fill })
+            Ok(Block::Unaligned { real, fill })
         }
     }
 
@@ -295,7 +281,7 @@ where
     IO: Read + Seek,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
     R: RngCore + CryptoRng,
-    C: Crypter,
+    C: StatefulCrypter,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         // Track the bytes we've read and we need to read.
@@ -306,44 +292,57 @@ where
         let origin = self.curr_offset()?;
         let mut offset = origin;
 
+        // Scratch data buffer.
+        let mut scratch = vec![0; self.padded_block_size()];
+
         while size > 0 {
-            match self.read_block(offset)? {
+            match self.read_block(offset, &mut scratch)? {
                 Block::Empty => {
                     break;
                 }
-                Block::Unaligned { iv, data, fill } => {
+                Block::Unaligned { real, fill } => {
                     let block = self.offset_block(offset);
+                    let (iv, data) = scratch.split_at_mut(C::iv_length());
 
                     // Decrypt the bytes we read.
                     let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-                    let pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
+
+                    self.crypter
+                        .decrypt(&key, iv, data)
+                        .map_err(|_| ())
+                        .unwrap();
 
                     // Calculate the number of bytes we've actually read and copy those bytes in.
-                    let nbytes = size.min(pt.len() - fill);
+                    let nbytes = size.min(real - fill);
                     if nbytes == 0 {
                         break;
                     }
 
-                    buf[total..total + nbytes].copy_from_slice(&pt[fill..fill + nbytes]);
+                    buf[total..total + nbytes].copy_from_slice(&data[fill..fill + nbytes]);
 
                     size -= nbytes;
                     offset += nbytes;
                     total += nbytes;
                 }
-                Block::Aligned { iv, data } => {
+                Block::Aligned { real } => {
                     let block = self.offset_block(offset);
+                    let (iv, data) = scratch.split_at_mut(C::iv_length());
 
                     // Decrypt the bytes we read.
                     let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-                    let pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
+
+                    self.crypter
+                        .decrypt(&key, iv, data)
+                        .map_err(|_| ())
+                        .unwrap();
 
                     // Copy in the decrypted bytes.
-                    let nbytes = size.min(pt.len());
+                    let nbytes = size.min(real);
                     if nbytes == 0 {
                         break;
                     }
 
-                    buf[total..total + nbytes].copy_from_slice(&pt[..nbytes]);
+                    buf[total..total + nbytes].copy_from_slice(&data[..nbytes]);
 
                     size -= nbytes;
                     offset += nbytes;
@@ -364,50 +363,57 @@ where
     IO: Read + Write + Seek,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
     R: RngCore + CryptoRng,
-    C: Crypter,
+    C: StatefulCrypter,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         // Track the bytes we've written and we need to write.
         let mut total = 0;
         let mut size = buf.len();
 
+        // Easier to track where we are in the stream.
         let origin = self.curr_offset()?;
         let mut offset = origin;
+
+        // Scratch data buffers.
+        let mut scratch = vec![0; self.padded_block_size()];
+        let mut scratch_block = vec![0; BLK_SZ];
 
         // If we aren't block-aligned, then we need to rewrite the bytes preceding our current
         // offset in the block.
         if !self.offset_is_aligned(offset) {
-            match self.read_block(offset)? {
+            match self.read_block(offset, &mut scratch)? {
                 // There should be something there, but we didn't read anything.
                 Block::Empty => {
                     self.io.seek(SeekFrom::Start(origin as u64))?;
                     return Ok(total);
                 }
-                Block::Unaligned { iv, data, fill } => {
+                Block::Unaligned { real, fill } => {
                     let block = self.offset_block(offset);
+                    let (iv, data) = scratch.split_at_mut(C::iv_length());
 
                     // Decrypt the bytes we read.
                     let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-                    let mut pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
+                    self.crypter
+                        .decrypt(&key, iv, &mut data[..real])
+                        .map_err(|_| ())
+                        .unwrap();
 
-                    // Extending the plaintext to a full block covers the case when what we are
-                    // overwriting with is longer than what is currently in the block. If we don't
-                    // do this, the `.copy_from_slice()` won't work.
-                    pt.extend(vec![0; BLK_SZ - pt.len()]);
+                    // Add in the bytes that we're writing, up until a block boundary.
+                    let rest = size.min(data.len() - fill);
+                    data[fill..fill + rest].copy_from_slice(&buf[total..total + rest]);
 
-                    // Calculate the number of bytes we've actually read and update the bytes we're
-                    // trying to overwrite in the plaintext.
-                    let rest = size.min(pt.len() - fill);
-                    pt[fill..fill + rest].copy_from_slice(&buf[..rest]);
-
-                    // Re-encrypt the plaintext.
-                    let iv = self.generate_iv();
+                    // Generate a new IV.
+                    self.rng.fill_bytes(iv);
                     let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
-                    let ct = C::encrypt(&key, &iv, &pt).map_err(|_| ()).unwrap();
+                    self.crypter
+                        .encrypt(&key, iv, data)
+                        .map_err(|_| ())
+                        .unwrap();
 
                     // Write the IV and ciphertext.
-                    let amount = data.len().max(fill + rest);
-                    let nbytes = self.write_block(offset, &iv, &ct[..amount])?;
+                    // The amount of bytes could exceed what was there originally (real).
+                    let amount = real.max(fill + rest);
+                    let nbytes = self.write_block(offset, &iv, &data[..amount])?;
                     let written = rest.min(nbytes - fill);
                     if nbytes == 0 || written == 0 {
                         self.io.seek(SeekFrom::Start(origin as u64))?;
@@ -427,16 +433,21 @@ where
         // We write full blocks of data as long as we're block-aligned.
         while size > 0 && size / BLK_SZ > 0 && self.offset_is_aligned(offset) {
             let block = self.offset_block(offset);
+            let (iv, _data) = scratch.split_at_mut(C::iv_length());
 
-            // Encrypt the data.
-            let iv = self.generate_iv();
+            // Copy data to a scratch block buffer for encryption.
+            scratch_block.copy_from_slice(&buf[total..total + BLK_SZ]);
+
+            // Encrypt the data with a new IV.
+            self.rng.fill_bytes(iv);
             let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
-            let ct = C::encrypt(&key, &iv, &buf[total..total + BLK_SZ])
+            self.crypter
+                .encrypt(&key, &iv, &mut scratch_block)
                 .map_err(|_| ())
                 .unwrap();
 
             // Write the IV and ciphertext.
-            let nbytes = self.write_block(offset, &iv, &ct)?;
+            let nbytes = self.write_block(offset, iv, &scratch_block)?;
             if nbytes == 0 {
                 self.io.seek(SeekFrom::Start((origin + total) as u64))?;
                 return Ok(total);
@@ -449,41 +460,56 @@ where
 
         // We have remaining bytes that don't fill an entire block.
         if size > 0 {
-            match self.read_block(offset)? {
+            match self.read_block(offset, &mut scratch)? {
                 // Receiving block empty means that there aren't any trailing bytes that we need to
                 // rewrite, so we can just go ahead and write out the remaining bytes.
                 Block::Empty => {
                     let block = self.offset_block(offset);
+                    let (iv, _data) = scratch.split_at_mut(C::iv_length());
+
+                    // Copy over the bytes to the scratch buffer for encryption.
+                    scratch_block[..size].copy_from_slice(&buf[total..total + size]);
 
                     // Encrypt the remaining bytes.
-                    let iv = self.generate_iv();
+                    self.rng.fill_bytes(iv);
                     let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
-                    let ct = C::encrypt(&key, &iv, &buf[total..total + size])
+
+                    self.crypter
+                        .encrypt(&key, iv, &mut scratch_block[..size])
                         .map_err(|_| ())
                         .unwrap();
 
                     // Write the block.
-                    total += self.write_block(offset, &iv, &ct)?;
+                    total += self.write_block(offset, iv, &scratch_block[..size])?;
                 }
                 // We need to rewrite any bytes trailing the overwritten bytes.
-                Block::Aligned { iv, data } => {
+                Block::Aligned { real } => {
                     let block = self.offset_block(offset);
+                    let (iv, data) = scratch.split_at_mut(C::iv_length());
 
                     // Decrypt the bytes.
                     let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
-                    let mut pt = C::decrypt(&key, &iv, &data).map_err(|_| ()).unwrap();
+
+                    self.crypter
+                        .decrypt(&key, iv, data)
+                        .map_err(|_| ())
+                        .unwrap();
 
                     // Copy in the bytes that we want to update.
-                    pt[..size].copy_from_slice(&buf[total..total + size]);
+                    data[..size].copy_from_slice(&buf[total..total + size]);
 
                     // Encrypt the plaintext.
-                    let iv = self.generate_iv();
+                    self.rng.fill_bytes(iv);
                     let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
-                    let ct = C::encrypt(&key, &iv, &pt).map_err(|_| ()).unwrap();
+
+                    self.crypter
+                        .encrypt(&key, iv, data)
+                        .map_err(|_| ())
+                        .unwrap();
 
                     // Write the block.
-                    let nbytes = size.max(pt.len());
-                    self.write_block(offset, &iv, &ct[..nbytes])?;
+                    let nbytes = size.max(real);
+                    self.write_block(offset, iv, &data[..nbytes])?;
 
                     total += size.min(nbytes);
                 }
@@ -519,7 +545,7 @@ mod tests {
 
     use super::*;
     use anyhow::Result;
-    use crypter::openssl::Aes256Ctr;
+    use crypter::openssl::StatefulAes256Ctr;
     use embedded_io::{
         adapters::FromStd,
         blocking::{Read, Seek, Write},
@@ -541,7 +567,7 @@ mod tests {
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
-            Aes256Ctr,
+            StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
@@ -570,7 +596,7 @@ mod tests {
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
-            Aes256Ctr,
+            StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
@@ -603,7 +629,7 @@ mod tests {
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
-            Aes256Ctr,
+            StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
@@ -641,7 +667,7 @@ mod tests {
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
-            Aes256Ctr,
+            StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
@@ -670,7 +696,7 @@ mod tests {
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
-            Aes256Ctr,
+            StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
@@ -700,7 +726,7 @@ mod tests {
                 FromStd<NamedTempFile>,
                 Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
                 ThreadRng,
-                Aes256Ctr,
+                StatefulAes256Ctr,
                 BLOCK_SIZE,
                 KEY_SIZE,
             >::new(
@@ -736,7 +762,7 @@ mod tests {
                 FromStd<NamedTempFile>,
                 Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
                 ThreadRng,
-                Aes256Ctr,
+                StatefulAes256Ctr,
                 BLOCK_SIZE,
                 KEY_SIZE,
             >::new(
@@ -772,7 +798,7 @@ mod tests {
             FromStd<File>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
-            Aes256Ctr,
+            StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
@@ -807,7 +833,7 @@ mod tests {
             FromStd<File>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
             ThreadRng,
-            Aes256Ctr,
+            StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
@@ -835,7 +861,7 @@ mod tests {
         assert_eq!(&data[..n], &['a' as u8; 24]);
         assert_eq!(
             fs::metadata("/tmp/blockivcrypt_short")?.len(),
-            m as u64 + Aes256Ctr::iv_length() as u64
+            m as u64 + StatefulAes256Ctr::iv_length() as u64
         );
 
         Ok(())
