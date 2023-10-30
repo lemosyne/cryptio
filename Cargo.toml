@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 crypter = { git = "https://github.com/lemosyne/crypter.git", branch = "stateful" }
-embedded-io = { git = "https://github.com/euugenechou/embedded-io.git" }
+embedded-io = { git = "https://github.com/lemosyne/embedded-io.git" }
 hasher = { git = "https://github.com/lemosyne/hasher.git" }
 hex = "0.4.3"
 khf = { git = "https://github.com/lemosyne/khf.git" }
@@ -15,9 +15,14 @@ rand = "0.8.5"
 
 [dev-dependencies]
 anyhow = "1.0.71"
+criterion = { version = "0.5.1", features = ["html_reports"] }
 crypter = { git = "https://github.com/lemosyne/crypter.git", branch = "stateful", features = ["openssl"] }
-embedded-io = { git = "https://github.com/euugenechou/embedded-io.git", features = ["std"] }
+embedded-io = { git = "https://github.com/lemosyne/embedded-io.git", features = ["std"] }
 hasher = { git = "https://github.com/lemosyne/hasher.git", features = ["openssl"] }
 path_macro = "1.0.0"
 rand = "0.8.5"
 tempfile = "3.5.0"
+
+[[bench]]
+name = "main"
+harness = false
