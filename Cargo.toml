@@ -21,7 +21,7 @@ embedded-io = { git = "https://github.com/lemosyne/embedded-io.git", features = 
 hasher = { git = "https://github.com/lemosyne/hasher.git", features = ["openssl"] }
 path_macro = "1.0.0"
 rand = "0.8.5"
-tempfile = "3.5.0"
+tempfile = { git = "https://github.com/lemosyne/tempfile.git" }
 
 [[bench]]
 name = "main"
