@@ -36,6 +36,13 @@ impl SequentialIvGenerator {
     }
 }
 
+// TODO: This is kinda bad, but whatever
+impl Default for SequentialIvGenerator {
+    fn default() -> Self {
+        Self::new(16)
+    }
+}
+
 impl IvGenerator for SequentialIvGenerator {
     type Error = Infallible;
 
