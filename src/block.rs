@@ -1,11 +1,10 @@
-use crate::Key;
+use crate::{IvGenerator, Key};
 use crypter::StatefulCrypter;
 use embedded_io::{
     blocking::{Read, ReadAt, Seek, Write, WriteAt},
     Io, SeekFrom,
 };
 use kms::KeyManagementScheme;
-use rand::{CryptoRng, RngCore};
 
 pub enum Block {
     Empty,
@@ -13,29 +12,29 @@ pub enum Block {
     Aligned { real: usize },
 }
 
-pub struct BlockIvCryptIo<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> {
+pub struct BlockIvCryptIo<'a, IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> {
     io: IO,
     kms: &'a mut KMS,
-    rng: &'a mut R,
+    ivgen: &'a mut G,
     crypter: &'a mut C,
 }
 
-impl<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize>
-    BlockIvCryptIo<'a, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+impl<'a, IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize>
+    BlockIvCryptIo<'a, IO, KMS, G, C, BLK_SZ, KEY_SZ>
 where
     IO: Io,
-    R: RngCore + CryptoRng,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     /// Constructs a new `BlockIvCryptoIo`.
-    pub fn new(io: IO, kms: &'a mut KMS, rng: &'a mut R, crypter: &'a mut C) -> Self
+    pub fn new(io: IO, kms: &'a mut KMS, ivg: &'a mut G, crypter: &'a mut C) -> Self
     where
         C: Default,
     {
         Self {
             io,
             kms,
-            rng,
+            ivgen: ivg,
             crypter,
         }
     }
@@ -163,12 +162,12 @@ where
     type Error = IO::Error;
 }
 
-impl<IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> Read
-    for BlockIvCryptIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> Read
+    for BlockIvCryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
 where
     IO: Read + Seek,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
-    R: RngCore + CryptoRng,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
@@ -245,12 +244,12 @@ where
     }
 }
 
-impl<IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> ReadAt
-    for BlockIvCryptIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> ReadAt
+    for BlockIvCryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
 where
     IO: ReadAt,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
-    R: RngCore + CryptoRng,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, Self::Error> {
@@ -322,12 +321,12 @@ where
     }
 }
 
-impl<IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> Write
-    for BlockIvCryptIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> Write
+    for BlockIvCryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
 where
     IO: Read + Write + Seek,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
-    R: RngCore + CryptoRng,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
@@ -369,7 +368,7 @@ where
                         data[fill..fill + rest].copy_from_slice(&buf[total..total + rest]);
 
                         // Generate a new IV.
-                        self.rng.fill_bytes(iv);
+                        self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
                         let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
                         self.crypter
                             .encrypt(&key, iv, data)
@@ -402,7 +401,7 @@ where
                 scratch_block.copy_from_slice(&buf[total..total + BLK_SZ]);
 
                 // Encrypt the data with a new IV.
-                self.rng.fill_bytes(iv);
+                self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
                 let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
                 self.crypter
                     .encrypt(&key, &iv, &mut scratch_block)
@@ -431,7 +430,7 @@ where
                         scratch_block[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the remaining bytes.
-                        self.rng.fill_bytes(iv);
+                        self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
                         let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
 
                         self.crypter
@@ -462,7 +461,7 @@ where
                         data[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the plaintext.
-                        self.rng.fill_bytes(iv);
+                        self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
                         let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
 
                         self.crypter
@@ -494,12 +493,12 @@ where
     }
 }
 
-impl<IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> WriteAt
-    for BlockIvCryptIo<'_, IO, KMS, R, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> WriteAt
+    for BlockIvCryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
 where
     IO: ReadAt + WriteAt,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
-    R: RngCore + CryptoRng,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<usize, Self::Error> {
@@ -537,7 +536,7 @@ where
                         data[fill..fill + rest].copy_from_slice(&buf[total..total + rest]);
 
                         // Generate a new IV.
-                        self.rng.fill_bytes(iv);
+                        self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
                         let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
                         self.crypter
                             .encrypt(&key, iv, data)
@@ -569,7 +568,7 @@ where
                 scratch_block.copy_from_slice(&buf[total..total + BLK_SZ]);
 
                 // Encrypt the data with a new IV.
-                self.rng.fill_bytes(iv);
+                self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
                 let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
                 self.crypter
                     .encrypt(&key, &iv, &mut scratch_block)
@@ -597,7 +596,7 @@ where
                         scratch_block[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the remaining bytes.
-                        self.rng.fill_bytes(iv);
+                        self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
                         let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
 
                         self.crypter
@@ -628,7 +627,7 @@ where
                         data[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the plaintext.
-                        self.rng.fill_bytes(iv);
+                        self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
                         let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
 
                         self.crypter
@@ -666,19 +665,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, File};
-
     use super::*;
+    use crate::SequentialIvGenerator;
     use anyhow::Result;
     use crypter::openssl::StatefulAes256Ctr;
-    use embedded_io::{
-        adapters::FromStd,
-        blocking::{Read, Seek, Write},
-        SeekFrom,
-    };
+    use embedded_io::{adapters::FromStd, SeekFrom};
     use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
     use khf::Khf;
-    use rand::{rngs::ThreadRng, Rng};
+    use rand::{rngs::ThreadRng, Rng, RngCore};
+    use std::fs::{self, File};
     use tempfile::NamedTempFile;
 
     const BLOCK_SIZE: usize = 128;
@@ -687,20 +682,20 @@ mod tests {
     #[test]
     fn simple() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -718,20 +713,20 @@ mod tests {
     #[test]
     fn simple_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -749,20 +744,20 @@ mod tests {
     #[test]
     fn offset_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -785,20 +780,20 @@ mod tests {
     #[test]
     fn offset_write_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -819,20 +814,20 @@ mod tests {
     #[test]
     fn misaligned_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -861,20 +856,20 @@ mod tests {
     #[test]
     fn misaligned_write_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -899,20 +894,20 @@ mod tests {
     #[test]
     fn short_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -931,20 +926,20 @@ mod tests {
     #[test]
     fn short_write_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -962,20 +957,20 @@ mod tests {
     #[test]
     fn read_too_much() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -994,20 +989,20 @@ mod tests {
     #[test]
     fn read_too_much_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<NamedTempFile>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -1026,24 +1021,24 @@ mod tests {
     fn random() -> Result<()> {
         for _ in 0..20 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+            let mut ivg = SequentialIvGenerator::new(16);
             let mut rng = ThreadRng::default();
             let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
                 FromStd<NamedTempFile>,
                 Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-                ThreadRng,
+                SequentialIvGenerator,
                 StatefulAes256Ctr,
                 BLOCK_SIZE,
                 KEY_SIZE,
             >::new(
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
-                &mut rng,
+                &mut ivg,
                 &mut crypter,
             );
 
-            let mut rng = ThreadRng::default();
             let nbytes = rng.gen::<usize>() % (1 << 16);
             let mut pt = vec![0; nbytes];
             rng.fill_bytes(&mut pt);
@@ -1066,23 +1061,23 @@ mod tests {
         for _ in 0..20 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
             let mut rng = ThreadRng::default();
+            let mut ivg = SequentialIvGenerator::new(16);
             let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
                 FromStd<NamedTempFile>,
                 Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-                ThreadRng,
+                SequentialIvGenerator,
                 StatefulAes256Ctr,
                 BLOCK_SIZE,
                 KEY_SIZE,
             >::new(
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
-                &mut rng,
+                &mut ivg,
                 &mut crypter,
             );
 
-            let mut rng = ThreadRng::default();
             let nbytes = rng.gen::<usize>() % (1 << 16);
             let mut pt = vec![0; nbytes];
             rng.fill_bytes(&mut pt);
@@ -1104,23 +1099,23 @@ mod tests {
         for _ in 0..10 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
             let mut rng = ThreadRng::default();
+            let mut ivg = SequentialIvGenerator::new(16);
             let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
                 FromStd<NamedTempFile>,
                 Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-                ThreadRng,
+                SequentialIvGenerator,
                 StatefulAes256Ctr,
                 BLOCK_SIZE,
                 KEY_SIZE,
             >::new(
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
-                &mut rng,
+                &mut ivg,
                 &mut crypter,
             );
 
-            let mut rng = ThreadRng::default();
             let mut pt = vec![0; BLOCK_SIZE];
             rng.fill_bytes(&mut pt);
 
@@ -1144,23 +1139,23 @@ mod tests {
         for _ in 0..10 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
             let mut rng = ThreadRng::default();
+            let mut ivg = SequentialIvGenerator::new(16);
             let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
                 FromStd<NamedTempFile>,
                 Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-                ThreadRng,
+                SequentialIvGenerator,
                 StatefulAes256Ctr,
                 BLOCK_SIZE,
                 KEY_SIZE,
             >::new(
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
-                &mut rng,
+                &mut ivg,
                 &mut crypter,
             );
 
-            let mut rng = ThreadRng::default();
             let mut pt = vec![0; BLOCK_SIZE];
             rng.fill_bytes(&mut pt);
 
@@ -1181,13 +1176,13 @@ mod tests {
     #[test]
     fn correctness() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<File>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
@@ -1201,7 +1196,7 @@ mod tests {
                     .open("/tmp/blockivcrypt")?,
             ),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -1219,13 +1214,13 @@ mod tests {
     #[test]
     fn correctness_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<File>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
@@ -1239,7 +1234,7 @@ mod tests {
                     .open("/tmp/blockivcrypt")?,
             ),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -1255,13 +1250,13 @@ mod tests {
     #[test]
     fn short() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<File>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
@@ -1275,7 +1270,7 @@ mod tests {
                     .open("/tmp/blockivcrypt_short")?,
             ),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
@@ -1300,13 +1295,13 @@ mod tests {
     #[test]
     fn short_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
             FromStd<File>,
             Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
-            ThreadRng,
+            SequentialIvGenerator,
             StatefulAes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
@@ -1320,7 +1315,7 @@ mod tests {
                     .open("/tmp/blockivcrypt_short")?,
             ),
             &mut khf,
-            &mut rng,
+            &mut ivg,
             &mut crypter,
         );
 
