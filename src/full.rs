@@ -1,10 +1,9 @@
-use crate::Key;
+use crate::{IvGenerator, Key};
 use crypter::StatefulCrypter;
 use embedded_io::{
     blocking::{Read, ReadAt, Seek, Write, WriteAt},
     Io, SeekFrom,
 };
-use rand::{CryptoRng, RngCore};
 
 pub enum Block {
     Empty,
@@ -12,26 +11,26 @@ pub enum Block {
     Aligned { real: usize },
 }
 
-pub struct IvCryptIo<'a, IO, R, C, const KEY_SZ: usize> {
+pub struct IvCryptIo<'a, IO, G, C, const KEY_SZ: usize> {
     pub io: IO,
     key: Key<KEY_SZ>,
-    rng: &'a mut R,
+    ivg: &'a mut G,
     crypter: &'a mut C,
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> IvCryptIo<'a, IO, R, C, KEY_SZ>
+impl<'a, IO, G, C, const KEY_SZ: usize> IvCryptIo<'a, IO, G, C, KEY_SZ>
 where
     IO: Io,
     C: StatefulCrypter,
 {
-    pub fn new(io: IO, key: Key<KEY_SZ>, rng: &'a mut R, crypter: &'a mut C) -> Self
+    pub fn new(io: IO, key: Key<KEY_SZ>, ivg: &'a mut G, crypter: &'a mut C) -> Self
     where
         C: Default,
     {
         Self {
             io,
             key,
-            rng,
+            ivg,
             crypter,
         }
     }
@@ -155,10 +154,10 @@ impl<'a, IO: Io, R, C, const KEY_SZ: usize> Io for IvCryptIo<'a, IO, R, C, KEY_S
     type Error = IO::Error;
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> Read for IvCryptIo<'a, IO, R, C, KEY_SZ>
+impl<'a, IO, G, C, const KEY_SZ: usize> Read for IvCryptIo<'a, IO, G, C, KEY_SZ>
 where
     IO: Read + Seek,
-    R: RngCore + CryptoRng,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
@@ -227,10 +226,10 @@ where
     }
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> ReadAt for IvCryptIo<'a, IO, R, C, KEY_SZ>
+impl<'a, IO, G, C, const KEY_SZ: usize> ReadAt for IvCryptIo<'a, IO, G, C, KEY_SZ>
 where
     IO: ReadAt,
-    R: RngCore + CryptoRng,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, Self::Error> {
@@ -294,10 +293,10 @@ where
     }
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> Write for IvCryptIo<'a, IO, R, C, KEY_SZ>
+impl<'a, IO, G, C, const KEY_SZ: usize> Write for IvCryptIo<'a, IO, G, C, KEY_SZ>
 where
     IO: Read + Write + Seek,
-    R: RngCore + CryptoRng,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
@@ -337,7 +336,7 @@ where
                         data[fill..fill + rest].copy_from_slice(&buf[total..total + rest]);
 
                         // Generate a new IV.
-                        self.rng.fill_bytes(iv);
+                        self.ivg.generate_iv(iv).map_err(|_| ()).unwrap();
 
                         self.crypter
                             .encrypt(&self.key, iv, data)
@@ -369,7 +368,7 @@ where
                 scratch_block.copy_from_slice(&buf[total..total + C::block_length()]);
 
                 // Encrypt the data with a new IV.
-                self.rng.fill_bytes(iv);
+                self.ivg.generate_iv(iv).map_err(|_| ()).unwrap();
 
                 self.crypter
                     .encrypt(&self.key, &iv, &mut scratch_block)
@@ -397,7 +396,7 @@ where
                         scratch_block[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the remaining bytes.
-                        self.rng.fill_bytes(iv);
+                        self.ivg.generate_iv(iv).map_err(|_| ()).unwrap();
 
                         self.crypter
                             .encrypt(&self.key, iv, &mut scratch_block[..size])
@@ -423,7 +422,7 @@ where
                         data[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the plaintext.
-                        self.rng.fill_bytes(iv);
+                        self.ivg.generate_iv(iv).map_err(|_| ()).unwrap();
 
                         self.crypter
                             .encrypt(&self.key, iv, data)
@@ -454,10 +453,10 @@ where
     }
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> WriteAt for IvCryptIo<'a, IO, R, C, KEY_SZ>
+impl<'a, IO, G, C, const KEY_SZ: usize> WriteAt for IvCryptIo<'a, IO, G, C, KEY_SZ>
 where
     IO: ReadAt + WriteAt,
-    R: RngCore + CryptoRng,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<usize, Self::Error> {
@@ -493,7 +492,7 @@ where
                         data[fill..fill + rest].copy_from_slice(&buf[total..total + rest]);
 
                         // Generate a new IV.
-                        self.rng.fill_bytes(iv);
+                        self.ivg.generate_iv(iv).map_err(|_| ()).unwrap();
 
                         self.crypter
                             .encrypt(&self.key, iv, data)
@@ -524,7 +523,7 @@ where
                 scratch_block.copy_from_slice(&buf[total..total + C::block_length()]);
 
                 // Encrypt the data with a new IV.
-                self.rng.fill_bytes(iv);
+                self.ivg.generate_iv(iv).map_err(|_| ()).unwrap();
 
                 self.crypter
                     .encrypt(&self.key, &iv, &mut scratch_block)
@@ -551,7 +550,7 @@ where
                         scratch_block[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the remaining bytes.
-                        self.rng.fill_bytes(iv);
+                        self.ivg.generate_iv(iv).map_err(|_| ()).unwrap();
 
                         self.crypter
                             .encrypt(&self.key, iv, &mut scratch_block[..size])
@@ -577,7 +576,7 @@ where
                         data[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the plaintext.
-                        self.rng.fill_bytes(iv);
+                        self.ivg.generate_iv(iv).map_err(|_| ()).unwrap();
 
                         self.crypter
                             .encrypt(&self.key, iv, data)
@@ -614,6 +613,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SequentialIvGenerator;
     use anyhow::Result;
     use crypter::openssl::StatefulAes256Ctr;
     use embedded_io::{
@@ -621,7 +621,7 @@ mod tests {
         blocking::{Read, ReadAt, Seek, Write, WriteAt},
         SeekFrom,
     };
-    use rand::rngs::ThreadRng;
+    use rand::{rngs::ThreadRng, RngCore};
     use tempfile::NamedTempFile;
 
     const KEY_SIZE: usize = 32;
@@ -629,18 +629,23 @@ mod tests {
     #[test]
     fn it_works() -> Result<()> {
         let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut key = [0; KEY_SIZE];
         rng.fill_bytes(&mut key);
 
-        let mut io =
-            IvCryptIo::<FromStd<NamedTempFile>, ThreadRng, StatefulAes256Ctr, KEY_SIZE>::new(
-                FromStd::new(NamedTempFile::new()?),
-                key,
-                &mut rng,
-                &mut crypter,
-            );
+        let mut io = IvCryptIo::<
+            FromStd<NamedTempFile>,
+            SequentialIvGenerator,
+            StatefulAes256Ctr,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(NamedTempFile::new()?),
+            key,
+            &mut ivg,
+            &mut crypter,
+        );
 
         let data1 = vec!['a' as u8; 8192];
         io.seek(SeekFrom::Start(0))?;
@@ -658,18 +663,23 @@ mod tests {
     #[test]
     fn it_works_at() -> Result<()> {
         let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut key = [0; KEY_SIZE];
         rng.fill_bytes(&mut key);
 
-        let mut io =
-            IvCryptIo::<FromStd<NamedTempFile>, ThreadRng, StatefulAes256Ctr, KEY_SIZE>::new(
-                FromStd::new(NamedTempFile::new()?),
-                key,
-                &mut rng,
-                &mut crypter,
-            );
+        let mut io = IvCryptIo::<
+            FromStd<NamedTempFile>,
+            SequentialIvGenerator,
+            StatefulAes256Ctr,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(NamedTempFile::new()?),
+            key,
+            &mut ivg,
+            &mut crypter,
+        );
 
         let data1 = vec!['a' as u8; 8192];
         io.write_all_at(&data1, 0)?;
