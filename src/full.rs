@@ -15,7 +15,7 @@ pub enum Block {
 pub struct IvCryptIo<'a, IO, R, C, const KEY_SZ: usize> {
     pub io: IO,
     key: Key<KEY_SZ>,
-    rng: R,
+    rng: &'a mut R,
     crypter: &'a mut C,
 }
 
@@ -24,7 +24,7 @@ where
     IO: Io,
     C: StatefulCrypter,
 {
-    pub fn new(io: IO, key: Key<KEY_SZ>, rng: R, crypter: &'a mut C) -> Self
+    pub fn new(io: IO, key: Key<KEY_SZ>, rng: &'a mut R, crypter: &'a mut C) -> Self
     where
         C: Default,
     {
@@ -629,17 +629,16 @@ mod tests {
     #[test]
     fn it_works() -> Result<()> {
         let mut rng = ThreadRng::default();
+        let mut crypter = StatefulAes256Ctr::new();
 
         let mut key = [0; KEY_SIZE];
         rng.fill_bytes(&mut key);
-
-        let mut crypter = StatefulAes256Ctr::new();
 
         let mut io =
             IvCryptIo::<FromStd<NamedTempFile>, ThreadRng, StatefulAes256Ctr, KEY_SIZE>::new(
                 FromStd::new(NamedTempFile::new()?),
                 key,
-                rng,
+                &mut rng,
                 &mut crypter,
             );
 
@@ -659,17 +658,16 @@ mod tests {
     #[test]
     fn it_works_at() -> Result<()> {
         let mut rng = ThreadRng::default();
+        let mut crypter = StatefulAes256Ctr::new();
 
         let mut key = [0; KEY_SIZE];
         rng.fill_bytes(&mut key);
-
-        let mut crypter = StatefulAes256Ctr::new();
 
         let mut io =
             IvCryptIo::<FromStd<NamedTempFile>, ThreadRng, StatefulAes256Ctr, KEY_SIZE>::new(
                 FromStd::new(NamedTempFile::new()?),
                 key,
-                rng,
+                &mut rng,
                 &mut crypter,
             );
 

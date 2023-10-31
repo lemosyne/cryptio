@@ -16,7 +16,7 @@ pub enum Block {
 pub struct BlockIvCryptIo<'a, IO, KMS, R, C, const BLK_SZ: usize, const KEY_SZ: usize> {
     io: IO,
     kms: &'a mut KMS,
-    rng: R,
+    rng: &'a mut R,
     crypter: &'a mut C,
 }
 
@@ -28,7 +28,7 @@ where
     C: StatefulCrypter,
 {
     /// Constructs a new `BlockIvCryptoIo`.
-    pub fn new(io: IO, kms: &'a mut KMS, rng: R, crypter: &'a mut C) -> Self
+    pub fn new(io: IO, kms: &'a mut KMS, rng: &'a mut R, crypter: &'a mut C) -> Self
     where
         C: Default,
     {
@@ -687,6 +687,7 @@ mod tests {
     #[test]
     fn simple() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -699,7 +700,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -717,6 +718,7 @@ mod tests {
     #[test]
     fn simple_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -729,7 +731,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -747,6 +749,7 @@ mod tests {
     #[test]
     fn offset_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -759,7 +762,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -782,6 +785,7 @@ mod tests {
     #[test]
     fn offset_write_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -794,7 +798,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -815,6 +819,7 @@ mod tests {
     #[test]
     fn misaligned_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -827,7 +832,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -856,6 +861,7 @@ mod tests {
     #[test]
     fn misaligned_write_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -868,7 +874,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -893,6 +899,7 @@ mod tests {
     #[test]
     fn short_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -905,7 +912,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -924,6 +931,7 @@ mod tests {
     #[test]
     fn short_write_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -936,7 +944,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -954,6 +962,7 @@ mod tests {
     #[test]
     fn read_too_much() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -966,7 +975,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -985,6 +994,7 @@ mod tests {
     #[test]
     fn read_too_much_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -997,7 +1007,7 @@ mod tests {
         >::new(
             FromStd::new(NamedTempFile::new()?),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -1016,6 +1026,7 @@ mod tests {
     fn random() -> Result<()> {
         for _ in 0..20 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+            let mut rng = ThreadRng::default();
             let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
@@ -1028,7 +1039,7 @@ mod tests {
             >::new(
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
-                ThreadRng::default(),
+                &mut rng,
                 &mut crypter,
             );
 
@@ -1054,6 +1065,7 @@ mod tests {
     fn random_at() -> Result<()> {
         for _ in 0..20 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+            let mut rng = ThreadRng::default();
             let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
@@ -1066,7 +1078,7 @@ mod tests {
             >::new(
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
-                ThreadRng::default(),
+                &mut rng,
                 &mut crypter,
             );
 
@@ -1091,6 +1103,7 @@ mod tests {
     fn sequential() -> Result<()> {
         for _ in 0..10 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+            let mut rng = ThreadRng::default();
             let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
@@ -1103,7 +1116,7 @@ mod tests {
             >::new(
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
-                ThreadRng::default(),
+                &mut rng,
                 &mut crypter,
             );
 
@@ -1130,6 +1143,7 @@ mod tests {
     fn sequential_at() -> Result<()> {
         for _ in 0..10 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+            let mut rng = ThreadRng::default();
             let mut crypter = StatefulAes256Ctr::new();
 
             let mut blockio = BlockIvCryptIo::<
@@ -1142,7 +1156,7 @@ mod tests {
             >::new(
                 FromStd::new(NamedTempFile::new()?),
                 &mut khf,
-                ThreadRng::default(),
+                &mut rng,
                 &mut crypter,
             );
 
@@ -1167,6 +1181,7 @@ mod tests {
     #[test]
     fn correctness() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -1186,7 +1201,7 @@ mod tests {
                     .open("/tmp/blockivcrypt")?,
             ),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -1204,6 +1219,7 @@ mod tests {
     #[test]
     fn correctness_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -1223,7 +1239,7 @@ mod tests {
                     .open("/tmp/blockivcrypt")?,
             ),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -1239,6 +1255,7 @@ mod tests {
     #[test]
     fn short() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -1258,7 +1275,7 @@ mod tests {
                     .open("/tmp/blockivcrypt_short")?,
             ),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
@@ -1283,6 +1300,7 @@ mod tests {
     #[test]
     fn short_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut rng = ThreadRng::default();
         let mut crypter = StatefulAes256Ctr::new();
 
         let mut blockio = BlockIvCryptIo::<
@@ -1302,7 +1320,7 @@ mod tests {
                     .open("/tmp/blockivcrypt_short")?,
             ),
             &mut khf,
-            ThreadRng::default(),
+            &mut rng,
             &mut crypter,
         );
 
