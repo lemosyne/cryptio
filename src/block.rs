@@ -1205,8 +1205,15 @@ mod tests {
         n += blockio.write(&['a' as u8; 7])?;
         blockio.seek(SeekFrom::Start(7).into())?;
         n += blockio.write(&['b' as u8; 29])?;
+
+        let mut buf = vec![0; 36];
+        blockio.seek(SeekFrom::Start(0).into())?;
+        blockio.read_exact(&mut buf).unwrap();
+
         assert_eq!(n, 36);
         assert_eq!(fs::metadata("/tmp/blockivcrypt")?.len(), 52);
+        assert_eq!(&buf[0..7], &['a' as u8; 7]);
+        assert_eq!(&buf[7..36], &['b' as u8; 29]);
 
         Ok(())
     }
@@ -1241,8 +1248,14 @@ mod tests {
         let mut n = 0;
         n += blockio.write_at(&['a' as u8; 7], 0)?;
         n += blockio.write_at(&['b' as u8; 29], 7)?;
+
+        let mut buf = vec![0; 36];
+        blockio.read_exact_at(&mut buf, 0).unwrap();
+
         assert_eq!(n, 36);
         assert_eq!(fs::metadata("/tmp/blockivcrypt")?.len(), 52);
+        assert_eq!(&buf[0..7], &['a' as u8; 7]);
+        assert_eq!(&buf[7..36], &['b' as u8; 29]);
 
         Ok(())
     }
