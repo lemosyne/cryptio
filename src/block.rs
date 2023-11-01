@@ -382,7 +382,7 @@ where
                         let written = rest.min(nbytes - fill);
                         if nbytes == 0 || written == 0 {
                             self.io.seek(SeekFrom::Start(origin as u64))?;
-                            return Ok(0);
+                            return Ok(total);
                         }
 
                         size -= written;
@@ -549,7 +549,7 @@ where
                         let nbytes = self.write_block_at(offset, &iv, &data[..amount])?;
                         let written = rest.min(nbytes - fill);
                         if nbytes == 0 || written == 0 {
-                            return Ok(0);
+                            return Ok(total);
                         }
 
                         size -= written;
@@ -1208,7 +1208,8 @@ mod tests {
 
         let mut buf = vec![0; 36];
         blockio.seek(SeekFrom::Start(0).into())?;
-        blockio.read_exact(&mut buf).unwrap();
+        blockio.read(&mut buf[0..7]).unwrap();
+        blockio.read(&mut buf[7..36]).unwrap();
 
         assert_eq!(n, 36);
         assert_eq!(fs::metadata("/tmp/blockivcrypt")?.len(), 52);
@@ -1250,7 +1251,8 @@ mod tests {
         n += blockio.write_at(&['b' as u8; 29], 7)?;
 
         let mut buf = vec![0; 36];
-        blockio.read_exact_at(&mut buf, 0).unwrap();
+        blockio.read_at(&mut buf[0..7], 0).unwrap();
+        blockio.read_at(&mut buf[7..36], 7).unwrap();
 
         assert_eq!(n, 36);
         assert_eq!(fs::metadata("/tmp/blockivcrypt")?.len(), 52);
@@ -1307,6 +1309,49 @@ mod tests {
 
     #[test]
     fn short_at() -> Result<()> {
+        let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
+        let mut ivg = SequentialIvGenerator::new(16);
+        let mut crypter = StatefulAes256Ctr::new();
+
+        let mut blockio = BlockIvCryptIo::<
+            FromStd<File>,
+            Khf<ThreadRng, Sha3_256, SHA3_256_MD_SIZE>,
+            SequentialIvGenerator,
+            StatefulAes256Ctr,
+            BLOCK_SIZE,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open("/tmp/blockivcrypt_short")?,
+            ),
+            &mut khf,
+            &mut ivg,
+            &mut crypter,
+        );
+
+        let n = blockio.write_at(&['a' as u8; 24], 0)?;
+
+        let mut data = vec![0; 400];
+        let m = blockio.read_at(&mut data, 0)?;
+
+        assert_eq!(n, 24);
+        assert_eq!(m, 24);
+        assert_eq!(&data[..n], &['a' as u8; 24]);
+        assert_eq!(
+            fs::metadata("/tmp/blockivcrypt_short")?.len(),
+            m as u64 + StatefulAes256Ctr::iv_length() as u64
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn read_nuking() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
         let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = StatefulAes256Ctr::new();
