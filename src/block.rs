@@ -238,7 +238,7 @@ where
             }
         }
 
-        self.io.seek(SeekFrom::Start((origin + total) as u64))?;
+        self.io.seek(SeekFrom::Start(offset as u64))?;
 
         Ok(total)
     }
@@ -349,7 +349,7 @@ where
                 match self.read_block(offset, &mut scratch)? {
                     // There should be something there, but we didn't read anything.
                     Block::Empty => {
-                        self.io.seek(SeekFrom::Start((origin + total) as u64))?;
+                        self.io.seek(SeekFrom::Start(offset as u64))?;
                         return Ok(total);
                     }
                     Block::Unaligned { real, fill } => {
@@ -381,7 +381,7 @@ where
                         let nbytes = self.write_block(offset, &iv, &data[..amount])?;
                         let written = rest.min(nbytes - fill);
                         if nbytes == 0 || written == 0 {
-                            self.io.seek(SeekFrom::Start((origin + total) as u64))?;
+                            self.io.seek(SeekFrom::Start(offset as u64))?;
                             return Ok(total);
                         }
 
@@ -411,7 +411,7 @@ where
                 // Write the IV and ciphertext.
                 let nbytes = self.write_block(offset, iv, &scratch_block)?;
                 if nbytes == 0 {
-                    self.io.seek(SeekFrom::Start((origin + total) as u64))?;
+                    self.io.seek(SeekFrom::Start(offset as u64))?;
                     return Ok(total);
                 }
 
@@ -485,7 +485,7 @@ where
             }
         }
 
-        self.io.seek(SeekFrom::Start((origin + total) as u64))?;
+        self.io.seek(SeekFrom::Start(offset as u64))?;
 
         Ok(total)
     }
@@ -610,6 +610,7 @@ where
                         let nbytes = self.write_block_at(offset, iv, &scratch_block[..size])?;
 
                         total += nbytes;
+                        offset += nbytes;
                         size -= nbytes;
                     }
                     // We need to rewrite any bytes trailing the overwritten bytes.
@@ -642,6 +643,7 @@ where
                         self.write_block_at(offset, iv, &data[..nbytes])?;
 
                         total += size.min(nbytes);
+                        offset += size.min(nbytes);
                         size -= size.min(nbytes);
                     }
                     _ => {
