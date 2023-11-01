@@ -349,7 +349,7 @@ where
                 match self.read_block(offset, &mut scratch)? {
                     // There should be something there, but we didn't read anything.
                     Block::Empty => {
-                        self.io.seek(SeekFrom::Start(origin as u64))?;
+                        self.io.seek(SeekFrom::Start((origin + total) as u64))?;
                         return Ok(total);
                     }
                     Block::Unaligned { real, fill } => {
@@ -381,7 +381,7 @@ where
                         let nbytes = self.write_block(offset, &iv, &data[..amount])?;
                         let written = rest.min(nbytes - fill);
                         if nbytes == 0 || written == 0 {
-                            self.io.seek(SeekFrom::Start(origin as u64))?;
+                            self.io.seek(SeekFrom::Start((origin + total) as u64))?;
                             return Ok(total);
                         }
 
