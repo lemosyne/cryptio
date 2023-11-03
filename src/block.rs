@@ -140,17 +140,21 @@ where
         let aligned = self.offset_aligned(offset);
         self.io.seek(SeekFrom::Start(aligned as u64))?;
         self.io.write(&iv)?;
-        Ok(self.io.write(&data)?)
+        let n = self.io.write(&data)?;
+        self.io.flush()?;
+        Ok(n)
     }
 
     /// Writes a block with a prepended IV to a given offset.
     fn write_block_at(&mut self, offset: usize, iv: &[u8], data: &[u8]) -> Result<usize, IO::Error>
     where
-        IO: WriteAt,
+        IO: WriteAt + Write,
     {
         let aligned = self.offset_aligned(offset);
         self.io.write_at(iv, aligned as u64)?;
-        Ok(self.io.write_at(data, (aligned + iv.len()) as u64)?)
+        let n = self.io.write_at(data, (aligned + iv.len()) as u64)?;
+        self.io.flush()?;
+        Ok(n)
     }
 }
 
@@ -498,7 +502,7 @@ where
 impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> WriteAt
     for BlockIvCryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
 where
-    IO: ReadAt + WriteAt,
+    IO: ReadAt + WriteAt + Write,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
     G: IvGenerator,
     C: StatefulCrypter,
