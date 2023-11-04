@@ -5,6 +5,7 @@ use std::convert::Infallible;
 pub mod block;
 pub mod full;
 pub mod old;
+pub mod recrypt;
 
 pub(crate) type Key<const N: usize> = [u8; N];
 
