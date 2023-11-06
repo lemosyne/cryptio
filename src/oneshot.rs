@@ -1,37 +1,36 @@
-use crate::Key;
+use crate::{IvGenerator, Key};
 use crypter::StatefulCrypter;
 use embedded_io::{
     blocking::{Read, ReadAt, ReadExactAtError, ReadExactError, Seek, Write, WriteAt},
     Io, SeekFrom,
 };
-use rand::{CryptoRng, RngCore};
 
 /// You should probably only use this writing or reading
 /// the entiriety of IO (or with a BufReader),
 /// as it uses one IV and thus usually requires a full read/write anyways
-pub struct OneshotCryptIo<'a, IO, R, C, const KEY_SZ: usize> {
+pub struct OneshotCryptIo<'a, IO, G, C, const KEY_SZ: usize> {
     pub io: IO,
     key: Key<KEY_SZ>,
-    rng: R,
+    ivg: G,
     crypter: &'a mut C,
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> OneshotCryptIo<'a, IO, R, C, KEY_SZ> {
-    pub fn new(io: IO, key: Key<KEY_SZ>, rng: R, crypter: &'a mut C) -> Self {
+impl<'a, IO, G, C, const KEY_SZ: usize> OneshotCryptIo<'a, IO, G, C, KEY_SZ> {
+    pub fn new(io: IO, key: Key<KEY_SZ>, ivg: G, crypter: &'a mut C) -> Self {
         Self {
             io,
             key,
-            rng,
+            ivg,
             crypter,
         }
     }
 }
 
-impl<'a, IO: Io, R, C, const KEY_SZ: usize> Io for OneshotCryptIo<'a, IO, R, C, KEY_SZ> {
+impl<'a, IO: Io, G, C, const KEY_SZ: usize> Io for OneshotCryptIo<'a, IO, G, C, KEY_SZ> {
     type Error = IO::Error;
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> Read for OneshotCryptIo<'a, IO, R, C, KEY_SZ>
+impl<'a, IO, G, C, const KEY_SZ: usize> Read for OneshotCryptIo<'a, IO, G, C, KEY_SZ>
 where
     IO: Read + Seek,
     C: StatefulCrypter,
@@ -95,9 +94,10 @@ where
     }
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> ReadAt for OneshotCryptIo<'a, IO, R, C, KEY_SZ>
+impl<'a, IO, G, C, const KEY_SZ: usize> ReadAt for OneshotCryptIo<'a, IO, G, C, KEY_SZ>
 where
     IO: ReadAt,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, IO::Error> {
@@ -156,10 +156,10 @@ where
     }
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> Write for OneshotCryptIo<'a, IO, R, C, KEY_SZ>
+impl<'a, IO, G, C, const KEY_SZ: usize> Write for OneshotCryptIo<'a, IO, G, C, KEY_SZ>
 where
     IO: Read + Write + Seek,
-    R: CryptoRng + RngCore,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
@@ -201,7 +201,7 @@ where
 
         // Generate the new IV.
         let mut new_iv = vec![0; C::iv_length()];
-        self.rng.fill_bytes(&mut new_iv);
+        self.ivg.generate_iv(&mut new_iv).map_err(|_| ()).unwrap();
 
         self.io.seek(SeekFrom::Start(0))?;
         self.io.write_all(&new_iv)?;
@@ -222,10 +222,10 @@ where
     }
 }
 
-impl<'a, IO, R, C, const KEY_SZ: usize> WriteAt for OneshotCryptIo<'a, IO, R, C, KEY_SZ>
+impl<'a, IO, G, C, const KEY_SZ: usize> WriteAt for OneshotCryptIo<'a, IO, G, C, KEY_SZ>
 where
     IO: ReadAt + WriteAt,
-    R: CryptoRng + RngCore,
+    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<usize, Self::Error> {
@@ -266,7 +266,7 @@ where
 
         // Generate the new IV.
         let mut new_iv = vec![0; C::iv_length()];
-        self.rng.fill_bytes(&mut new_iv);
+        self.ivg.generate_iv(&mut new_iv).map_err(|_| ()).unwrap();
         self.io.write_all_at(&new_iv, 0)?;
 
         // Encrypt the plaintext and write it.
