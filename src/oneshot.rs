@@ -11,12 +11,12 @@ use embedded_io::{
 pub struct OneshotCryptIo<'a, IO, G, C, const KEY_SZ: usize> {
     pub io: IO,
     key: Key<KEY_SZ>,
-    ivg: G,
+    ivg: &'a mut G,
     crypter: &'a mut C,
 }
 
 impl<'a, IO, G, C, const KEY_SZ: usize> OneshotCryptIo<'a, IO, G, C, KEY_SZ> {
-    pub fn new(io: IO, key: Key<KEY_SZ>, ivg: G, crypter: &'a mut C) -> Self {
+    pub fn new(io: IO, key: Key<KEY_SZ>, ivg: &'a mut G, crypter: &'a mut C) -> Self {
         Self {
             io,
             key,
