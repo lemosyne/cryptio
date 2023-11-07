@@ -120,8 +120,6 @@ where
         let n = self.io.read_at(&mut scratch, start_pos)?;
 
         // Decrypt the ciphertext and copy it back into buf
-        // let plaintext = C::decrypt(&self.key, &iv, buf).map_err(|_| ()).unwrap();
-        // buf.copy_from_slice(&plaintext);
         self.crypter
             .decrypt(&self.key, &iv, &mut scratch)
             .map_err(|_| ())
@@ -139,10 +137,6 @@ where
         }
 
         // Decrypt it
-        // let iv = buf[..C::iv_length()].to_vec();
-        // let plaintext = C::decrypt(&self.key, &iv, &mut buf[C::iv_length()..])
-        //     .map_err(|_| ())
-        //     .unwrap();
         let (iv, pt) = buf.split_at_mut(C::iv_length());
         self.crypter
             .decrypt(&self.key, iv, pt)
@@ -179,10 +173,6 @@ where
             // Otherwise, decrypt the ciphertext.
             let (iv, ct) = data.split_at_mut(C::iv_length());
 
-            // plaintext_b =
-            //     C::decrypt(&self.key, &data[..C::iv_length()], &data[C::iv_length()..])
-            //         .map_err(|_| ())
-            //         .unwrap();
             self.crypter
                 .decrypt(&self.key, iv, ct)
                 .map_err(|_| ())
@@ -191,10 +181,10 @@ where
             let mut pt = ct.to_vec();
 
             // And substitute in the to-be-written data
-            let sub_end = pt.len().max(start_pos as usize + buf.len());
-            let diff = sub_end - start_pos as usize;
-            pt[start_pos as usize..sub_end].copy_from_slice(&buf[..diff]);
-            pt.extend(&buf[diff..]);
+            let sub_bytes = buf.len().min(pt.len() - start_pos as usize);
+            pt[start_pos as usize..start_pos as usize + sub_bytes]
+                .copy_from_slice(&buf[..sub_bytes]);
+            pt.extend(&buf[sub_bytes..]);
 
             pt
         };
@@ -213,6 +203,10 @@ where
             .unwrap();
 
         self.io.write_all(&plaintext)?;
+
+        // Restore cursor position.
+        self.io
+            .seek(SeekFrom::Start(start_pos + buf.len() as u64))?;
 
         Ok(buf.len())
     }
@@ -256,10 +250,10 @@ where
             let mut pt = ct.to_vec();
 
             // And substitute in the to-be-written data
-            let sub_end = pt.len().max(start_pos as usize + buf.len());
-            let diff = sub_end - start_pos as usize;
-            pt[start_pos as usize..sub_end].copy_from_slice(&buf[..diff]);
-            pt.extend(&buf[diff..]);
+            let sub_bytes = buf.len().min(pt.len() - start_pos as usize);
+            pt[start_pos as usize..start_pos as usize + sub_bytes]
+                .copy_from_slice(&buf[..sub_bytes]);
+            pt.extend(&buf[sub_bytes..]);
 
             pt
         };
@@ -287,5 +281,242 @@ where
 {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
         self.io.seek(pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SequentialIvGenerator;
+    use anyhow::Result;
+    use crypter::aes::Aes256Ctr;
+    use embedded_io::{
+        adapters::FromStd,
+        blocking::{Read, ReadAt, Seek, Write, WriteAt},
+        SeekFrom,
+    };
+    use rand::{rngs::ThreadRng, RngCore};
+    use tempfile::NamedTempFile;
+
+    const KEY_SIZE: usize = 32;
+
+    #[test]
+    fn oneshot() -> Result<()> {
+        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
+        let mut crypter = Aes256Ctr::new();
+
+        let mut key = [0; KEY_SIZE];
+        rng.fill_bytes(&mut key);
+
+        let mut io = OneshotCryptIo::<
+            FromStd<NamedTempFile>,
+            SequentialIvGenerator,
+            Aes256Ctr,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(NamedTempFile::new()?),
+            key,
+            &mut ivg,
+            &mut crypter,
+        );
+
+        let data1 = vec!['a' as u8; 8192];
+        io.seek(SeekFrom::Start(0))?;
+        io.write_all(&data1)?;
+
+        let mut data2 = vec![];
+        io.seek(SeekFrom::Start(0))?;
+        io.read_to_end(&mut data2)?;
+
+        assert_eq!(data1, data2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn oneshot_at() -> Result<()> {
+        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
+        let mut crypter = Aes256Ctr::new();
+
+        let mut key = [0; KEY_SIZE];
+        rng.fill_bytes(&mut key);
+
+        let mut io = OneshotCryptIo::<
+            FromStd<NamedTempFile>,
+            SequentialIvGenerator,
+            Aes256Ctr,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(NamedTempFile::new()?),
+            key,
+            &mut ivg,
+            &mut crypter,
+        );
+
+        let data1 = vec!['a' as u8; 8192];
+        io.write_all_at(&data1, 0)?;
+
+        let mut data2 = vec![];
+        io.read_to_end_at(&mut data2, 0)?;
+
+        assert_eq!(data1, data2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite() -> Result<()> {
+        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
+        let mut crypter = Aes256Ctr::new();
+
+        let mut key = [0; KEY_SIZE];
+        rng.fill_bytes(&mut key);
+
+        let mut io = OneshotCryptIo::<
+            FromStd<NamedTempFile>,
+            SequentialIvGenerator,
+            Aes256Ctr,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(NamedTempFile::new()?),
+            key,
+            &mut ivg,
+            &mut crypter,
+        );
+
+        let xs = vec!['a' as u8; 8192];
+        let ys = vec!['b' as u8; 8192];
+
+        io.seek(SeekFrom::Start(0))?;
+        io.write_all(&xs)?;
+
+        io.seek(SeekFrom::Start(3))?;
+        io.write_all(&ys)?;
+
+        let mut data = vec![];
+        io.seek(SeekFrom::Start(0))?;
+        io.read_to_end(&mut data)?;
+
+        assert_eq!(&data[0..3], &xs[0..3]);
+        assert_eq!(&data[3..], &ys);
+        assert_eq!(data.len(), ys.len() + 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_at() -> Result<()> {
+        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
+        let mut crypter = Aes256Ctr::new();
+
+        let mut key = [0; KEY_SIZE];
+        rng.fill_bytes(&mut key);
+
+        let mut io = OneshotCryptIo::<
+            FromStd<NamedTempFile>,
+            SequentialIvGenerator,
+            Aes256Ctr,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(NamedTempFile::new()?),
+            key,
+            &mut ivg,
+            &mut crypter,
+        );
+
+        let xs = vec!['a' as u8; 8192];
+        let ys = vec!['b' as u8; 8192];
+
+        io.write_all_at(&xs, 0)?;
+        io.write_all_at(&ys, 3)?;
+
+        let mut data = vec![];
+        io.read_to_end_at(&mut data, 0)?;
+
+        assert_eq!(&data[0..3], &xs[0..3]);
+        assert_eq!(&data[3..], &ys);
+        assert_eq!(data.len(), ys.len() + 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn append() -> Result<()> {
+        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
+        let mut crypter = Aes256Ctr::new();
+
+        let mut key = [0; KEY_SIZE];
+        rng.fill_bytes(&mut key);
+
+        let mut io = OneshotCryptIo::<
+            FromStd<NamedTempFile>,
+            SequentialIvGenerator,
+            Aes256Ctr,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(NamedTempFile::new()?),
+            key,
+            &mut ivg,
+            &mut crypter,
+        );
+
+        let xs = vec!['a' as u8; 8192];
+        let ys = vec!['b' as u8; 8192];
+
+        io.seek(SeekFrom::Start(0))?;
+        io.write_all(&xs)?;
+        io.write_all(&ys)?;
+
+        let mut data = vec![];
+        io.seek(SeekFrom::Start(0))?;
+        io.read_to_end(&mut data)?;
+
+        assert_eq!(&data[..xs.len()], &xs);
+        assert_eq!(&data[xs.len()..], &ys);
+        assert_eq!(data.len(), xs.len() + ys.len());
+
+        Ok(())
+    }
+
+    #[test]
+    fn append_at() -> Result<()> {
+        let mut rng = ThreadRng::default();
+        let mut ivg = SequentialIvGenerator::new(16);
+        let mut crypter = Aes256Ctr::new();
+
+        let mut key = [0; KEY_SIZE];
+        rng.fill_bytes(&mut key);
+
+        let mut io = OneshotCryptIo::<
+            FromStd<NamedTempFile>,
+            SequentialIvGenerator,
+            Aes256Ctr,
+            KEY_SIZE,
+        >::new(
+            FromStd::new(NamedTempFile::new()?),
+            key,
+            &mut ivg,
+            &mut crypter,
+        );
+
+        let xs = vec!['a' as u8; 8192];
+        let ys = vec!['b' as u8; 8192];
+
+        io.write_all_at(&xs, 0)?;
+        io.write_all_at(&ys, xs.len() as u64)?;
+
+        let mut data = vec![];
+        io.read_to_end_at(&mut data, 0)?;
+
+        assert_eq!(&data[..xs.len()], &xs);
+        assert_eq!(&data[xs.len()..], &ys);
+        assert_eq!(data.len(), xs.len() + ys.len());
+
+        Ok(())
     }
 }
