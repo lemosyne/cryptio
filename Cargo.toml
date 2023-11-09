@@ -16,7 +16,7 @@ rand = "0.8.5"
 anyhow = "1.0.71"
 crypter = { path = "../crypter" }
 embedded-io = { path = "../embedded-io", features = ["std", "alloc"] }
-hasher = { git = "https://github.com/lemosyne/hasher.git", features = ["openssl"] }
+hasher = { git = "https://github.com/lemosyne/hasher.git" }
 path_macro = "1.0.0"
 rand = "0.8.5"
 tempfile = { git = "https://github.com/lemosyne/tempfile.git" }

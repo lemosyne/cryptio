@@ -678,7 +678,7 @@ mod tests {
     use anyhow::Result;
     use crypter::aes::Aes256Ctr;
     use embedded_io::{adapters::FromStd, SeekFrom};
-    use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
+    use hasher::sha3::{Sha3_256, SHA3_256_MD_SIZE};
     use khf::Khf;
     use rand::{rngs::ThreadRng, Rng, RngCore};
     use std::fs::{self, File};

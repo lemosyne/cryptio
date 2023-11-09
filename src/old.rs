@@ -479,7 +479,7 @@ mod tests {
         blocking::{Read, Seek, Write},
         SeekFrom,
     };
-    use hasher::openssl::SHA3_256_MD_SIZE;
+    use hasher::sha3::SHA3_256_MD_SIZE;
     use tempfile::NamedTempFile;
 
     const BLOCK_SIZE: usize = 4096;
