@@ -5,19 +5,19 @@ edition = "2021"
 
 [dependencies]
 crypter = { git = "https://github.com/lemosyne/crypter.git" }
-embedded-io = { git = "https://github.com/lemosyne/embedded-io.git" }
+minimal-io = { git = "https://github.com/lemosyne/minimal-io.git" }
 hasher = { git = "https://github.com/lemosyne/hasher.git" }
 hex = "0.4.3"
 khf = { git = "https://github.com/lemosyne/khf.git" }
 kms = { git = "https://github.com/lemosyne/kms.git" }
-persistence = { git = "https://github.com/lemosyne/persistence.git" }
 rand = "0.8.5"
+thiserror = "1.0.50"
 
 [dev-dependencies]
 anyhow = "1.0.71"
-crypter = { git = "https://github.com/lemosyne/crypter.git", features = ["openssl"] }
-embedded-io = { git = "https://github.com/lemosyne/embedded-io.git", features = ["std"] }
-hasher = { git = "https://github.com/lemosyne/hasher.git", features = ["openssl"] }
+crypter = { git = "https://github.com/lemosyne/crypter.git" }
+minimal-io = { git = "https://github.com/lemosyne/minimal-io.git" }
+hasher = { git = "https://github.com/lemosyne/hasher.git" }
 path_macro = "1.0.0"
 rand = "0.8.5"
-tempfile = "3.5.0"
+tempfile = { git = "https://github.com/lemosyne/tempfile.git" }

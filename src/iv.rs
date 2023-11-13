@@ -1,10 +1,10 @@
 use crate::Key;
 use crypter::Crypter;
-use embedded_io::{
+use kms::KeyManagementScheme;
+use minimal_io::{
     blocking::{Read, ReadExactError, Seek, Write},
     Io, SeekFrom,
 };
-use kms::KeyManagementScheme;
 use rand::{CryptoRng, RngCore};
 use std::marker::PhantomData;
 
@@ -520,13 +520,13 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use crypter::openssl::Aes256Ctr;
-    use embedded_io::{
+    use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
+    use khf::Khf;
+    use minimal_io::{
         adapters::FromStd,
         blocking::{Read, Seek, Write},
         SeekFrom,
     };
-    use hasher::openssl::{Sha3_256, SHA3_256_MD_SIZE};
-    use khf::Khf;
     use rand::{rngs::ThreadRng, Rng};
     use tempfile::NamedTempFile;
 
