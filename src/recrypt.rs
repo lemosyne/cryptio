@@ -2,8 +2,8 @@ use crate::{error::Error, IvGenerator, Key};
 use crypter::StatefulCrypter;
 use kms::KeyManagementScheme;
 use minimal_io::{
-    blocking::{Read, ReadAt, Write, WriteAt},
-    Io, Seek, SeekFrom,
+    blocking::{Read, ReadAt, Seek, Write, WriteAt},
+    Io, SeekFrom,
 };
 
 pub enum Block {

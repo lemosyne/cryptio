@@ -1,8 +1,8 @@
 use crate::Key;
 use crypter::{Crypter, StatefulCrypter};
 use minimal_io::{
-    blocking::{Read, Write},
-    Io, Seek, SeekFrom,
+    blocking::{Read, Seek, Write},
+    Io, SeekFrom,
 };
 use std::marker::PhantomData;
 
@@ -475,11 +475,7 @@ mod tests {
     use anyhow::Result;
     use crypter::aes::Aes256Ctr;
     use hasher::sha3::SHA3_256_MD_SIZE;
-    use minimal_io::{
-        blocking::{Read, Write},
-        stdio::StdIo,
-        Seek, SeekFrom,
-    };
+    use minimal_io::stdio::StdIo;
     use tempfile::NamedTempFile;
 
     const BLOCK_SIZE: usize = 4096;

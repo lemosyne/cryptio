@@ -1,8 +1,8 @@
 use crate::{IvGenerator, Key};
 use crypter::StatefulCrypter;
 use minimal_io::{
-    blocking::{Read, ReadAt, Write, WriteAt},
-    Io, Seek, SeekFrom,
+    blocking::{Read, ReadAt, Seek, Write, WriteAt},
+    Io, SeekFrom,
 };
 
 pub enum Block {
@@ -643,11 +643,7 @@ mod tests {
     use crate::SequentialIvGenerator;
     use anyhow::Result;
     use crypter::aes::Aes256Ctr;
-    use minimal_io::{
-        blocking::{Read, ReadAt, Write, WriteAt},
-        stdio::StdIo,
-        Seek, SeekFrom,
-    };
+    use minimal_io::stdio::StdIo;
     use rand::{rngs::ThreadRng, RngCore};
     use tempfile::NamedTempFile;
 

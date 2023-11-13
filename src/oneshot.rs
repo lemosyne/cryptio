@@ -3,8 +3,8 @@ use std::convert::Infallible;
 use crate::{error::Error, IvGenerator, Key};
 use crypter::StatefulCrypter;
 use minimal_io::{
-    blocking::{Read, ReadAt, ReadExactError, Write, WriteAt},
-    Io, Seek, SeekFrom,
+    blocking::{Read, ReadAt, ReadExactError, Seek, Write, WriteAt},
+    Io, SeekFrom,
 };
 
 /// You should probably only use this writing or reading
@@ -315,11 +315,7 @@ mod tests {
     use crate::SequentialIvGenerator;
     use anyhow::Result;
     use crypter::aes::Aes256Ctr;
-    use minimal_io::{
-        blocking::{Read, ReadAt, Write, WriteAt},
-        stdio::StdIo,
-        Seek, SeekFrom,
-    };
+    use minimal_io::stdio::StdIo;
     use rand::{rngs::ThreadRng, RngCore};
     use tempfile::NamedTempFile;
 
