@@ -1201,7 +1201,7 @@ mod tests {
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open("/tmp/blockivcrypt")?,
+                    .open("/tmp/blockivrecrypt")?,
             ),
             &mut khf,
             &mut ivg,
@@ -1220,7 +1220,7 @@ mod tests {
         blockio.read(&mut buf[7..36]).unwrap();
 
         assert_eq!(n, 36);
-        assert_eq!(fs::metadata("/tmp/blockivcrypt")?.len(), 52);
+        assert_eq!(fs::metadata("/tmp/blockivrecrypt")?.len(), 52);
         assert_eq!(&buf[0..7], &['a' as u8; 7]);
         assert_eq!(&buf[7..36], &['b' as u8; 29]);
 
@@ -1247,7 +1247,7 @@ mod tests {
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open("/tmp/blockivcrypt_at")?,
+                    .open("/tmp/blockivrecrypt_at")?,
             ),
             &mut khf,
             &mut ivg,
@@ -1263,7 +1263,7 @@ mod tests {
         blockio.read_at(&mut buf[7..36], 7).unwrap();
 
         assert_eq!(n, 36);
-        assert_eq!(fs::metadata("/tmp/blockivcrypt_at")?.len(), 52);
+        assert_eq!(fs::metadata("/tmp/blockivrecrypt_at")?.len(), 52);
         assert_eq!(&buf[0..7], &['a' as u8; 7]);
         assert_eq!(&buf[7..36], &['b' as u8; 29]);
 
@@ -1290,7 +1290,7 @@ mod tests {
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open("/tmp/blockivcrypt_short")?,
+                    .open("/tmp/blockivrecrypt_short")?,
             ),
             &mut khf,
             &mut ivg,
@@ -1309,7 +1309,7 @@ mod tests {
         assert_eq!(m, 24);
         assert_eq!(&data[..n], &stuff);
         assert_eq!(
-            fs::metadata("/tmp/blockivcrypt_short")?.len(),
+            fs::metadata("/tmp/blockivrecrypt_short")?.len(),
             m as u64 + Aes256Ctr::iv_length() as u64
         );
 
@@ -1336,7 +1336,7 @@ mod tests {
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open("/tmp/blockivcrypt_short_at")?,
+                    .open("/tmp/blockivrecrypt_short_at")?,
             ),
             &mut khf,
             &mut ivg,
@@ -1352,7 +1352,7 @@ mod tests {
         assert_eq!(m, 24);
         assert_eq!(&data[..n], &['a' as u8; 24]);
         assert_eq!(
-            fs::metadata("/tmp/blockivcrypt_short_at")?.len(),
+            fs::metadata("/tmp/blockivrecrypt_short_at")?.len(),
             m as u64 + Aes256Ctr::iv_length() as u64
         );
 
