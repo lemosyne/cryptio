@@ -7,6 +7,7 @@ pub mod full;
 pub mod old;
 pub mod oneshot;
 pub mod recrypt;
+pub mod unpadded;
 
 pub(crate) type Key<const N: usize> = [u8; N];
 
