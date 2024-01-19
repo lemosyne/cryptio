@@ -43,67 +43,64 @@ where
     IO: Read + Seek,
     G: IvGenerator,
 {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        let start_pos = self.io.stream_position().map_err(Error::Inner)?;
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IO::Error> {
+        let origin = self.io.stream_position()?;
 
         // Read the current iv
-        let mut iv = Vec::with_capacity(C::iv_length());
-        self.io.seek(SeekFrom::Start(0)).map_err(Error::Inner)?;
+        let mut iv = vec![0; C::iv_length()];
+        self.io.seek(SeekFrom::Start(0))?;
         match self.io.read_exact(&mut iv) {
             Ok(()) => {}
             Err(ReadExactError::Other(e)) => return Err(Error::Inner(e)),
             Err(_) => {
-                self.io
-                    .seek(SeekFrom::Start(start_pos))
-                    .map_err(Error::Inner)?;
                 return Ok(0);
             }
         };
 
-        // Read the desired data's ciphertext
-        // TODO: verify that this is correct, maybe decrypt could require
-        // more than buf.len() bytes or produce a smaller plaintext
-        self.io
-            .seek(SeekFrom::Start(start_pos))
-            .map_err(Error::Inner)?;
-        let mut scratch = vec![0; buf.len()];
-        let n = self.io.read(&mut scratch).map_err(Error::Inner)?;
+        // Read the rest of the file.
+        let mut all = vec![];
+        let n = self.io.read_to_end(&mut all)?;
 
-        // Decrypt the ciphertext and copy it back into buf
-        // let plaintext = C::decrypt(&self.key, &iv, buf).map_err(|_| ()).unwrap();
-        // buf.copy_from_slice(&plaintext);
+        // Decrypt the file.
         self.crypter
-            .decrypt(&self.key, &iv, &mut scratch)
-            .map_err(|_| ())
-            .unwrap();
-        buf.copy_from_slice(&scratch);
-
-        Ok(n)
-    }
-
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize, Self::Error> {
-        // Read the complete iv + ciphertext
-        let cn = self.io.read_to_end(buf).map_err(Error::Inner)?;
-        if cn < C::iv_length() {
-            return Ok(0);
-        }
-
-        // Decrypt it
-        // let iv = buf[..C::iv_length()].to_vec();
-        // let plaintext = C::decrypt(&self.key, &iv, &mut buf[C::iv_length()..])
-        //     .map_err(|_| ())
-        //     .unwrap();
-        let (iv, pt) = buf.split_at_mut(C::iv_length());
-        self.crypter
-            .decrypt(&self.key, iv, pt)
+            .decrypt(&self.key, &iv, &mut all)
             .map_err(|_| ())
             .unwrap();
 
-        // Copy the plaintext back into buf
-        *buf = pt.to_vec();
+        let start = (origin as usize).min(n);
+        let end = (start + buf.len()).min(n);
+        let len = end - start;
 
-        Ok(buf.len())
+        buf[0..len].copy_from_slice(&all[start..end]);
+
+        self.io.seek(SeekFrom::Start(origin + len as u64))?;
+
+        Ok(len)
     }
+
+    // fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize, Self::Error> {
+    //     // Read the complete iv + ciphertext
+    //     let cn = self.io.read_to_end(buf)?;
+    //     if cn < FAKE_IV_LENGTH {
+    //         return Ok(0);
+    //     }
+
+    //     // Decrypt it
+    //     // let iv = buf[..FAKE_IV_LENGTH].to_vec();
+    //     // let plaintext = C::decrypt(&self.key, &iv, &mut buf[FAKE_IV_LENGTH..])
+    //     //     .map_err(|_| ())
+    //     //     .unwrap();
+    //     let (iv, pt) = buf.split_at_mut(FAKE_IV_LENGTH);
+    //     self.crypter
+    //         .decrypt(&self.key, iv, pt)
+    //         .map_err(|_| ())
+    //         .unwrap();
+
+    //     // Copy the plaintext back into buf
+    //     *buf = pt.to_vec();
+
+    //     Ok(buf.len())
+    // }
 }
 
 impl<'a, IO, G, C, const KEY_SZ: usize> ReadAt for OneshotCryptIo<'a, IO, G, C, KEY_SZ>
@@ -112,11 +109,11 @@ where
     G: IvGenerator,
     C: StatefulCrypter,
 {
-    fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, Self::Error> {
-        let start_pos = offset;
+    fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, IO::Error> {
+        // let start_pos = offset;
 
         // Read the current iv
-        let mut iv = Vec::with_capacity(C::iv_length());
+        let mut iv = vec![0; C::iv_length()];
         match self.io.read_exact_at(&mut iv, 0) {
             Ok(()) => {}
             Err(ReadExactError::Other(e)) => return Err(Error::Inner(e)),
@@ -125,43 +122,44 @@ where
             }
         };
 
-        // Read the desired data's ciphertext
-        // TODO: verify that this is correct, maybe decrypt could require
-        // more than buf.len() bytes or produce a smaller plaintext
-        let mut scratch = vec![0; buf.len()];
-        let n = self
-            .io
-            .read_at(&mut scratch, start_pos)
-            .map_err(Error::Inner)?;
+        // Read the rest of the file.
+        let mut all = vec![];
+        let n = self.io.read_to_end_at(&mut all, iv.len() as u64)?;
 
-        // Decrypt the ciphertext and copy it back into buf
+        // Decrypt the file.
         self.crypter
-            .decrypt(&self.key, &iv, &mut scratch)
+            .decrypt(&self.key, &iv, &mut all)
             .map_err(|_| ())
             .unwrap();
-        buf.copy_from_slice(&scratch);
 
-        Ok(n)
+        let start = (offset as usize).min(n);
+        let end = (start + buf.len()).min(n);
+        let len = end - start;
+
+        buf[0..len].copy_from_slice(&all[start..end]);
+
+        Ok(len)
     }
 
-    fn read_to_end_at(&mut self, buf: &mut Vec<u8>, offset: u64) -> Result<usize, Self::Error> {
-        // Read the complete iv + ciphertext
-        let cn = self.io.read_to_end_at(buf, offset).map_err(Error::Inner)?;
-        if cn < C::iv_length() {
-            return Ok(0);
-        }
+    // fn read_to_end_at(&mut self, buf: &mut Vec<u8>, offset: u64) -> Result<usize, Self::Error> {
+    //     // Read the complete iv + ciphertext
+    //     let cn = self.io.read_to_end_at(buf, offset)?;
+    //     if cn < FAKE_IV_LENGTH {
+    //         return Ok(0);
+    //     }
 
-        // Decrypt it
-        let (iv, pt) = buf.split_at_mut(C::iv_length());
-        self.crypter
-            .decrypt(&self.key, iv, pt)
-            .map_err(Error::Crypt)?;
+    //     // Decrypt it
+    //     let (iv, pt) = buf.split_at_mut(FAKE_IV_LENGTH);
+    //     self.crypter
+    //         .decrypt(&self.key, iv, pt)
+    //         .map_err(|_| ())
+    //         .unwrap();
 
-        // Copy the plaintext back into buf
-        *buf = pt.to_vec();
+    //     // Copy the plaintext back into buf
+    //     *buf = pt.to_vec();
 
-        Ok(buf.len())
-    }
+    //     Ok(buf.len())
+    // }
 }
 
 impl<'a, IO, G, C, const KEY_SZ: usize> Write for OneshotCryptIo<'a, IO, G, C, KEY_SZ>
@@ -255,11 +253,11 @@ where
             let (iv, ct) = data.split_at_mut(C::iv_length());
 
             // plaintext_b =
-            //     C::decrypt(&self.key, &data[..C::iv_length()], &data[C::iv_length()..])
+            //     C::decrypt(&self.key, &data[..FAKE_IV_LENGTH], &data[FAKE_IV_LENGTH..])
             //         .map_err(|_| ())
             //         .unwrap();
             self.crypter
-                .decrypt(&self.key, iv, ct)
+                .decrypt(&self.key, &iv, ct)
                 .map_err(|_| ())
                 .unwrap();
 

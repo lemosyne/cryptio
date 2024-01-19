@@ -1,10 +1,10 @@
-use crate::{error::Error, IvGenerator, Key};
+use crate::Key;
 use crypter::StatefulCrypter;
-use kms::KeyManagementScheme;
-use minimal_io::{
+use embedded_io::{
     blocking::{Read, ReadAt, Seek, Write, WriteAt},
     Io, SeekFrom,
 };
+use kms::KeyManagementScheme;
 
 pub enum Block {
     Empty,
@@ -12,31 +12,24 @@ pub enum Block {
     Aligned { real: usize },
 }
 
-pub struct BlockIvRecryptIo<'a, IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> {
+pub struct UnpaddedBlockIvCryptIo<'a, IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> {
     io: IO,
     kms: &'a mut KMS,
-    ivgen: &'a mut G,
     crypter: &'a mut C,
 }
 
-impl<'a, IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize>
-    BlockIvRecryptIo<'a, IO, KMS, G, C, BLK_SZ, KEY_SZ>
+impl<'a, IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize>
+    UnpaddedBlockIvCryptIo<'a, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Io,
-    G: IvGenerator,
     C: StatefulCrypter,
 {
     /// Constructs a new `BlockIvCryptoIo`.
-    pub fn new(io: IO, kms: &'a mut KMS, ivg: &'a mut G, crypter: &'a mut C) -> Self
+    pub fn new(io: IO, kms: &'a mut KMS, crypter: &'a mut C) -> Self
     where
         C: Default,
     {
-        Self {
-            io,
-            kms,
-            ivgen: ivg,
-            crypter,
-        }
+        Self { io, kms, crypter }
     }
 
     /// Returns if `offset` is aligned to a block boundary.
@@ -51,7 +44,7 @@ where
 
     /// Returns the size of a padded block.
     fn padded_block_size(&self) -> usize {
-        BLK_SZ + C::iv_length()
+        BLK_SZ + 0
     }
 
     /// Returns `offset` aligned to the start of its block.
@@ -91,13 +84,13 @@ where
         let nbytes = self.io.read(buf)?;
 
         // Restore seek cursor if we didn't read anything.
-        if nbytes == 0 || nbytes < padding + C::iv_length() {
+        if nbytes == 0 || nbytes < padding + 0 {
             self.io.seek(SeekFrom::Start(offset as u64))?;
             return Ok(Block::Empty);
         }
 
         // The real data size (doesn't include IV).
-        let real = nbytes - C::iv_length();
+        let real = nbytes - 0;
 
         if padding == 0 {
             Ok(Block::Aligned { real })
@@ -118,12 +111,12 @@ where
         let nbytes = self.io.read_at(buf, aligned as u64)?;
 
         // Restore seek cursor if we didn't read anything.
-        if nbytes == 0 || nbytes < padding + C::iv_length() {
+        if nbytes == 0 || nbytes < padding + 0 {
             return Ok(Block::Empty);
         }
 
         // The real data size (doesn't include IV).
-        let real = nbytes - C::iv_length();
+        let real = nbytes - 0;
 
         if padding == 0 {
             Ok(Block::Aligned { real })
@@ -133,48 +126,44 @@ where
     }
 
     /// Writes a block with a prepended IV to a given offset.
-    fn write_block(&mut self, offset: usize, iv: &[u8], data: &[u8]) -> Result<usize, IO::Error>
+    fn write_block(&mut self, offset: usize, data: &[u8]) -> Result<usize, IO::Error>
     where
         IO: Write + Seek,
     {
         let aligned = self.offset_aligned(offset);
         self.io.seek(SeekFrom::Start(aligned as u64))?;
-        self.io.write(&iv)?;
+        // self.io.write(&iv)?;
         let n = self.io.write(&data)?;
         self.io.flush()?;
         Ok(n)
     }
 
     /// Writes a block with a prepended IV to a given offset.
-    fn write_block_at(&mut self, offset: usize, iv: &[u8], data: &[u8]) -> Result<usize, IO::Error>
+    fn write_block_at(&mut self, offset: usize, data: &[u8]) -> Result<usize, IO::Error>
     where
-        IO: WriteAt,
+        IO: WriteAt + Write,
     {
         let aligned = self.offset_aligned(offset);
-        self.io.write_at(iv, aligned as u64)?;
-        let n = self.io.write_at(data, (aligned + iv.len()) as u64)?;
+        // self.io.write_at(iv, aligned as u64)?;
+        let n = self.io.write_at(data, (aligned + 0) as u64)?;
         self.io.flush()?;
         Ok(n)
     }
 }
 
-impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> Io
-    for BlockIvRecryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Io
+    for UnpaddedBlockIvCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
-    C: StatefulCrypter,
     IO: Io,
-    G: IvGenerator,
-    KMS: KeyManagementScheme,
 {
-    type Error = Error<C::Error, IO::Error, G::Error, KMS::Error>;
+    type Error = IO::Error;
 }
 
-impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> Read
-    for BlockIvRecryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Read
+    for UnpaddedBlockIvCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Read + Seek,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
-    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
@@ -183,27 +172,29 @@ where
         let mut size = buf.len();
 
         // Easier to track where we are in the stream.
-        let origin = self.curr_offset().map_err(Error::Inner)?;
+        let origin = self.curr_offset()?;
         let mut offset = origin;
 
         // Scratch data buffer.
         let mut scratch = vec![0; self.padded_block_size()];
 
         while size > 0 {
-            match self
-                .read_block(offset, &mut scratch)
-                .map_err(Error::Inner)?
-            {
+            match self.read_block(offset, &mut scratch)? {
                 Block::Empty => {
                     break;
                 }
                 Block::Unaligned { real, fill } => {
                     let block = self.offset_block(offset);
-                    let (iv, data) = scratch.split_at_mut(C::iv_length());
+                    let (_iv, data) = scratch.split_at_mut(0);
+                    let iv = &vec![0; C::iv_length()];
 
                     // Decrypt the bytes we read.
-                    let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                    self.crypter.decrypt(&key, iv, data).map_err(Error::Crypt)?;
+                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
+
+                    self.crypter
+                        .decrypt(&key, iv, data)
+                        .map_err(|_| ())
+                        .unwrap();
 
                     // Calculate the number of bytes we've actually read and copy those bytes in.
                     let nbytes = size.min(real - fill);
@@ -219,11 +210,16 @@ where
                 }
                 Block::Aligned { real } => {
                     let block = self.offset_block(offset);
-                    let (iv, data) = scratch.split_at_mut(C::iv_length());
+                    let (_iv, data) = scratch.split_at_mut(0);
+                    let iv = &vec![0; C::iv_length()];
 
                     // Decrypt the bytes we read.
-                    let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                    self.crypter.decrypt(&key, iv, data).map_err(Error::Crypt)?;
+                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
+
+                    self.crypter
+                        .decrypt(&key, iv, data)
+                        .map_err(|_| ())
+                        .unwrap();
 
                     // Copy in the decrypted bytes.
                     let nbytes = size.min(real);
@@ -240,20 +236,17 @@ where
             }
         }
 
-        self.io
-            .seek(SeekFrom::Start(offset as u64))
-            .map_err(Error::Inner)?;
+        self.io.seek(SeekFrom::Start(offset as u64))?;
 
         Ok(total)
     }
 }
 
-impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> ReadAt
-    for BlockIvRecryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> ReadAt
+    for UnpaddedBlockIvCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
     IO: ReadAt,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
-    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, Self::Error> {
@@ -266,20 +259,22 @@ where
         let mut scratch = vec![0; self.padded_block_size()];
 
         while size > 0 {
-            match self
-                .read_block_at(offset, &mut scratch)
-                .map_err(Error::Inner)?
-            {
+            match self.read_block_at(offset, &mut scratch)? {
                 Block::Empty => {
                     break;
                 }
                 Block::Unaligned { real, fill } => {
                     let block = self.offset_block(offset);
-                    let (iv, data) = scratch.split_at_mut(C::iv_length());
+                    let (_iv, data) = scratch.split_at_mut(0);
+                    let iv = &vec![0; C::iv_length()];
 
                     // Decrypt the bytes we read.
-                    let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                    self.crypter.decrypt(&key, iv, data).map_err(Error::Crypt)?;
+                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
+
+                    self.crypter
+                        .decrypt(&key, iv, data)
+                        .map_err(|_| ())
+                        .unwrap();
 
                     // Calculate the number of bytes we've actually read and copy those bytes in.
                     let nbytes = size.min(real - fill);
@@ -295,11 +290,16 @@ where
                 }
                 Block::Aligned { real } => {
                     let block = self.offset_block(offset);
-                    let (iv, data) = scratch.split_at_mut(C::iv_length());
+                    let (_iv, data) = scratch.split_at_mut(0);
+                    let iv = &vec![0; C::iv_length()];
 
                     // Decrypt the bytes we read.
-                    let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                    self.crypter.decrypt(&key, iv, data).map_err(Error::Crypt)?;
+                    let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
+
+                    self.crypter
+                        .decrypt(&key, iv, data)
+                        .map_err(|_| ())
+                        .unwrap();
 
                     // Copy in the decrypted bytes.
                     let nbytes = size.min(real);
@@ -320,12 +320,11 @@ where
     }
 }
 
-impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> Write
-    for BlockIvRecryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Write
+    for UnpaddedBlockIvCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
     IO: Read + Write + Seek,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
-    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
@@ -334,7 +333,7 @@ where
         let mut size = buf.len();
 
         // Easier to track where we are in the stream.
-        let origin = self.curr_offset().map_err(Error::Inner)?;
+        let origin = self.curr_offset()?;
         let mut offset = origin;
 
         // Scratch data buffers.
@@ -345,47 +344,43 @@ where
             // If we aren't block-aligned, then we need to rewrite the bytes preceding our current
             // offset in the block.
             if !self.offset_is_aligned(offset) {
-                match self
-                    .read_block(offset, &mut scratch)
-                    .map_err(Error::Inner)?
-                {
+                match self.read_block(offset, &mut scratch)? {
                     // There should be something there, but we didn't read anything.
                     Block::Empty => {
-                        self.io
-                            .seek(SeekFrom::Start(offset as u64))
-                            .map_err(Error::Inner)?;
+                        self.io.seek(SeekFrom::Start(offset as u64))?;
                         return Ok(total);
                     }
                     Block::Unaligned { real, fill } => {
                         let block = self.offset_block(offset);
-                        let (iv, data) = scratch.split_at_mut(C::iv_length());
+                        let (_iv, data) = scratch.split_at_mut(0);
+                        let iv = &vec![0; C::iv_length()];
 
                         // Decrypt the bytes we read.
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
+                        let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
                         self.crypter
                             .decrypt(&key, iv, &mut data[..real])
-                            .map_err(Error::Crypt)?;
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Add in the bytes that we're writing, up until a block boundary.
                         let rest = size.min(data.len() - fill);
                         data[fill..fill + rest].copy_from_slice(&buf[total..total + rest]);
 
                         // Generate a new IV.
-                        self.ivgen.generate_iv(iv).map_err(Error::IV)?;
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                        self.crypter.encrypt(&key, iv, data).map_err(Error::Crypt)?;
+                        // self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
+                        let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
+                        self.crypter
+                            .encrypt(&key, iv, data)
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Write the IV and ciphertext.
                         // The amount of bytes could exceed what was there originally (real).
                         let amount = real.max(fill + rest);
-                        let nbytes = self
-                            .write_block(offset, &iv, &data[..amount])
-                            .map_err(Error::Inner)?;
+                        let nbytes = self.write_block(offset, &data[..amount])?;
                         let written = rest.min(nbytes - fill);
                         if nbytes == 0 || written == 0 {
-                            self.io
-                                .seek(SeekFrom::Start(offset as u64))
-                                .map_err(Error::Inner)?;
+                            self.io.seek(SeekFrom::Start(offset as u64))?;
                             return Ok(total);
                         }
 
@@ -399,26 +394,24 @@ where
                 }
             } else if size > BLK_SZ {
                 let block = self.offset_block(offset);
-                let (iv, _data) = scratch.split_at_mut(C::iv_length());
+                let (_iv, _data) = scratch.split_at_mut(0);
+                let iv = &vec![0; C::iv_length()];
 
                 // Copy data to a scratch block buffer for encryption.
                 scratch_block.copy_from_slice(&buf[total..total + BLK_SZ]);
 
                 // Encrypt the data with a new IV.
-                self.ivgen.generate_iv(iv).map_err(Error::IV)?;
-                let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
+                // self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
+                let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
                 self.crypter
                     .encrypt(&key, &iv, &mut scratch_block)
-                    .map_err(Error::Crypt)?;
+                    .map_err(|_| ())
+                    .unwrap();
 
                 // Write the IV and ciphertext.
-                let nbytes = self
-                    .write_block(offset, iv, &scratch_block)
-                    .map_err(Error::Inner)?;
+                let nbytes = self.write_block(offset, &scratch_block)?;
                 if nbytes == 0 {
-                    self.io
-                        .seek(SeekFrom::Start(offset as u64))
-                        .map_err(Error::Inner)?;
+                    self.io.seek(SeekFrom::Start(offset as u64))?;
                     return Ok(total);
                 }
 
@@ -426,30 +419,28 @@ where
                 offset += nbytes;
                 size -= nbytes;
             } else {
-                match self
-                    .read_block(offset, &mut scratch)
-                    .map_err(Error::Inner)?
-                {
+                match self.read_block(offset, &mut scratch)? {
                     // Receiving block empty means that there aren't any trailing bytes that we need to
                     // rewrite, so we can just go ahead and write out the remaining bytes.
                     Block::Empty => {
                         let block = self.offset_block(offset);
-                        let (iv, _data) = scratch.split_at_mut(C::iv_length());
+                        let (_iv, _data) = scratch.split_at_mut(0);
+                        let iv = &vec![0; C::iv_length()];
 
                         // Copy over the bytes to the scratch buffer for encryption.
                         scratch_block[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the remaining bytes.
-                        self.ivgen.generate_iv(iv).map_err(Error::IV)?;
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
+                        // self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
+                        let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
+
                         self.crypter
                             .encrypt(&key, iv, &mut scratch_block[..size])
-                            .map_err(Error::Crypt)?;
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Write the block.
-                        let nbytes = self
-                            .write_block(offset, iv, &scratch_block[..size])
-                            .map_err(Error::Inner)?;
+                        let nbytes = self.write_block(offset, &scratch_block[..size])?;
 
                         total += nbytes;
                         offset += nbytes;
@@ -458,24 +449,32 @@ where
                     // We need to rewrite any bytes trailing the overwritten bytes.
                     Block::Aligned { real } => {
                         let block = self.offset_block(offset);
-                        let (iv, data) = scratch.split_at_mut(C::iv_length());
+                        let (_iv, data) = scratch.split_at_mut(0);
+                        let iv = &vec![0; C::iv_length()];
 
                         // Decrypt the bytes.
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                        self.crypter.decrypt(&key, iv, data).map_err(Error::Crypt)?;
+                        let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
+
+                        self.crypter
+                            .decrypt(&key, iv, data)
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Copy in the bytes that we want to update.
                         data[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the plaintext.
-                        self.ivgen.generate_iv(iv).map_err(Error::IV)?;
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                        self.crypter.encrypt(&key, iv, data).map_err(Error::Crypt)?;
+                        // self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
+                        let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
+
+                        self.crypter
+                            .encrypt(&key, iv, data)
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Write the block.
                         let nbytes = size.max(real);
-                        self.write_block(offset, iv, &data[..nbytes])
-                            .map_err(Error::Inner)?;
+                        self.write_block(offset, &data[..nbytes])?;
 
                         total += size.min(nbytes);
                         offset += size.min(nbytes);
@@ -488,24 +487,21 @@ where
             }
         }
 
-        self.io
-            .seek(SeekFrom::Start(offset as u64))
-            .map_err(Error::Inner)?;
+        self.io.seek(SeekFrom::Start(offset as u64))?;
 
         Ok(total)
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.io.flush().map_err(Error::Inner)
+        self.io.flush()
     }
 }
 
-impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> WriteAt
-    for BlockIvRecryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> WriteAt
+    for UnpaddedBlockIvCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
-    IO: ReadAt + WriteAt,
+    IO: ReadAt + WriteAt + Write,
     KMS: KeyManagementScheme<KeyId = u64, Key = Key<KEY_SZ>>,
-    G: IvGenerator,
     C: StatefulCrypter,
 {
     fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<usize, Self::Error> {
@@ -522,39 +518,39 @@ where
             // If we aren't block-aligned, then we need to rewrite the bytes preceding our current
             // offset in the block.
             if !self.offset_is_aligned(offset) {
-                match self
-                    .read_block_at(offset, &mut scratch)
-                    .map_err(Error::Inner)?
-                {
+                match self.read_block_at(offset, &mut scratch)? {
                     // There should be something there, but we didn't read anything.
                     Block::Empty => {
                         return Ok(total);
                     }
                     Block::Unaligned { real, fill } => {
                         let block = self.offset_block(offset);
-                        let (iv, data) = scratch.split_at_mut(C::iv_length());
+                        let (_iv, data) = scratch.split_at_mut(0);
+                        let iv = &vec![0; C::iv_length()];
 
                         // Decrypt the bytes we read.
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
+                        let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
                         self.crypter
                             .decrypt(&key, iv, &mut data[..real])
-                            .map_err(Error::Crypt)?;
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Add in the bytes that we're writing, up until a block boundary.
                         let rest = size.min(data.len() - fill);
                         data[fill..fill + rest].copy_from_slice(&buf[total..total + rest]);
 
                         // Generate a new IV.
-                        self.ivgen.generate_iv(iv).map_err(Error::IV)?;
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                        self.crypter.encrypt(&key, iv, data).map_err(Error::Crypt)?;
+                        // self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
+                        let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
+                        self.crypter
+                            .encrypt(&key, iv, data)
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Write the IV and ciphertext.
                         // The amount of bytes could exceed what was there originally (real).
                         let amount = real.max(fill + rest);
-                        let nbytes = self
-                            .write_block_at(offset, &iv, &data[..amount])
-                            .map_err(Error::Inner)?;
+                        let nbytes = self.write_block_at(offset, &data[..amount])?;
                         let written = rest.min(nbytes - fill);
                         if nbytes == 0 || written == 0 {
                             return Ok(total);
@@ -570,22 +566,22 @@ where
                 }
             } else if size > BLK_SZ {
                 let block = self.offset_block(offset);
-                let (iv, _data) = scratch.split_at_mut(C::iv_length());
+                let (_iv, _data) = scratch.split_at_mut(0);
+                let iv = &vec![0; C::iv_length()];
 
                 // Copy data to a scratch block buffer for encryption.
                 scratch_block.copy_from_slice(&buf[total..total + BLK_SZ]);
 
                 // Encrypt the data with a new IV.
-                self.ivgen.generate_iv(iv).map_err(Error::IV)?;
-                let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
+                // self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
+                let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
                 self.crypter
                     .encrypt(&key, &iv, &mut scratch_block)
-                    .map_err(Error::Crypt)?;
+                    .map_err(|_| ())
+                    .unwrap();
 
                 // Write the IV and ciphertext.
-                let nbytes = self
-                    .write_block_at(offset, iv, &scratch_block)
-                    .map_err(Error::Inner)?;
+                let nbytes = self.write_block_at(offset, &scratch_block)?;
                 if nbytes == 0 {
                     return Ok(total);
                 }
@@ -594,30 +590,28 @@ where
                 offset += nbytes;
                 size -= nbytes;
             } else {
-                match self
-                    .read_block_at(offset, &mut scratch)
-                    .map_err(Error::Inner)?
-                {
+                match self.read_block_at(offset, &mut scratch)? {
                     // Receiving block empty means that there aren't any trailing bytes that we need to
                     // rewrite, so we can just go ahead and write out the remaining bytes.
                     Block::Empty => {
                         let block = self.offset_block(offset);
-                        let (iv, _data) = scratch.split_at_mut(C::iv_length());
+                        let (_iv, _data) = scratch.split_at_mut(0);
+                        let iv = &vec![0; C::iv_length()];
 
                         // Copy over the bytes to the scratch buffer for encryption.
                         scratch_block[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the remaining bytes.
-                        self.ivgen.generate_iv(iv).map_err(Error::IV)?;
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
+                        // self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
+                        let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
+
                         self.crypter
                             .encrypt(&key, iv, &mut scratch_block[..size])
-                            .map_err(Error::Crypt)?;
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Write the block.
-                        let nbytes = self
-                            .write_block_at(offset, iv, &scratch_block[..size])
-                            .map_err(Error::Inner)?;
+                        let nbytes = self.write_block_at(offset, &scratch_block[..size])?;
 
                         total += nbytes;
                         offset += nbytes;
@@ -626,24 +620,32 @@ where
                     // We need to rewrite any bytes trailing the overwritten bytes.
                     Block::Aligned { real } => {
                         let block = self.offset_block(offset);
-                        let (iv, data) = scratch.split_at_mut(C::iv_length());
+                        let (_iv, data) = scratch.split_at_mut(0);
+                        let iv = &vec![0; C::iv_length()];
 
                         // Decrypt the bytes.
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                        self.crypter.decrypt(&key, iv, data).map_err(Error::Crypt)?;
+                        let key = self.kms.derive(block as u64).map_err(|_| ()).unwrap();
+
+                        self.crypter
+                            .decrypt(&key, iv, data)
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Copy in the bytes that we want to update.
                         data[..size].copy_from_slice(&buf[total..total + size]);
 
                         // Encrypt the plaintext.
-                        self.ivgen.generate_iv(iv).map_err(Error::IV)?;
-                        let key = self.kms.derive(block as u64).map_err(Error::KMS)?;
-                        self.crypter.encrypt(&key, iv, data).map_err(Error::Crypt)?;
+                        // self.ivgen.generate_iv(iv).map_err(|_| ()).unwrap();
+                        let key = self.kms.update(block as u64).map_err(|_| ()).unwrap();
+
+                        self.crypter
+                            .encrypt(&key, iv, data)
+                            .map_err(|_| ())
+                            .unwrap();
 
                         // Write the block.
                         let nbytes = size.max(real);
-                        self.write_block_at(offset, iv, &data[..nbytes])
-                            .map_err(Error::Inner)?;
+                        self.write_block_at(offset, &data[..nbytes])?;
 
                         total += size.min(nbytes);
                         offset += size.min(nbytes);
@@ -658,34 +660,26 @@ where
 
         Ok(total)
     }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.io.flush().map_err(Error::Inner)
-    }
 }
 
-impl<IO, KMS, G, C, const BLK_SZ: usize, const KEY_SZ: usize> Seek
-    for BlockIvRecryptIo<'_, IO, KMS, G, C, BLK_SZ, KEY_SZ>
+impl<IO, KMS, C, const BLK_SZ: usize, const KEY_SZ: usize> Seek
+    for UnpaddedBlockIvCryptIo<'_, IO, KMS, C, BLK_SZ, KEY_SZ>
 where
-    C: StatefulCrypter,
     IO: Seek,
-    G: IvGenerator,
-    KMS: KeyManagementScheme,
 {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
-        self.io.seek(pos).map_err(Error::Inner)
+        self.io.seek(pos)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SequentialIvGenerator;
     use anyhow::Result;
     use crypter::aes::Aes256Ctr;
+    use embedded_io::{adapters::FromStd, SeekFrom};
     use hasher::sha3::{Sha3_256, SHA3_256_MD_SIZE};
     use khf::Khf;
-    use minimal_io::{stdio::StdIo, SeekFrom};
     use rand::{rngs::ThreadRng, Rng, RngCore};
     use std::fs::{self, File};
     use tempfile::NamedTempFile;
@@ -696,22 +690,16 @@ mod tests {
     #[test]
     fn simple() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all(&['a' as u8; BLOCK_SIZE])?;
 
@@ -727,27 +715,21 @@ mod tests {
     #[test]
     fn simple_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all_at(&['a' as u8; BLOCK_SIZE], 0)?;
 
         let mut buf = vec![0; BLOCK_SIZE];
-        blockio.read_exact_at(&mut buf, 0)?;
+        blockio.read_exact_at(&mut buf, 0).unwrap();
 
         assert_eq!(&buf[..], &['a' as u8; BLOCK_SIZE]);
 
@@ -758,22 +740,16 @@ mod tests {
     #[test]
     fn offset_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all(&['a' as u8; 4 * BLOCK_SIZE])?;
         blockio.seek(SeekFrom::Start(3))?;
@@ -794,28 +770,22 @@ mod tests {
     #[test]
     fn offset_write_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all_at(&['a' as u8; 4 * BLOCK_SIZE], 0)?;
         blockio.write_all_at(&['b' as u8; 4], 3)?;
 
         let mut buf = vec![0; 4 * BLOCK_SIZE];
-        blockio.read_exact_at(&mut buf, 0)?;
+        blockio.read_exact_at(&mut buf, 0).unwrap();
 
         assert_eq!(&buf[..3], &['a' as u8; 3]);
         assert_eq!(&buf[3..7], &['b' as u8; 4]);
@@ -828,22 +798,16 @@ mod tests {
     #[test]
     fn misaligned_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all(&['a' as u8; 2 * BLOCK_SIZE])?;
         blockio.seek(SeekFrom::Start((BLOCK_SIZE / 2) as u64))?;
@@ -870,28 +834,22 @@ mod tests {
     #[test]
     fn misaligned_write_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all_at(&['a' as u8; 2 * BLOCK_SIZE], 0)?;
         blockio.write_all_at(&['b' as u8; BLOCK_SIZE], (BLOCK_SIZE / 2) as u64)?;
 
         let mut buf = vec![0; 2 * BLOCK_SIZE];
-        blockio.read_exact_at(&mut buf, 0)?;
+        blockio.read_exact_at(&mut buf, 0).unwrap();
 
         assert_eq!(&buf[..BLOCK_SIZE / 2], &['a' as u8; BLOCK_SIZE / 2]);
         assert_eq!(
@@ -908,22 +866,16 @@ mod tests {
     #[test]
     fn short_write() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all(&['a' as u8])?;
         blockio.write_all(&['b' as u8])?;
@@ -940,28 +892,22 @@ mod tests {
     #[test]
     fn short_write_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all_at(&['a' as u8], 0)?;
         blockio.write_all_at(&['b' as u8], 1)?;
 
         let mut buf = vec![0; 2];
-        blockio.read_exact_at(&mut buf, 0)?;
+        blockio.read_exact_at(&mut buf, 0).unwrap();
 
         assert_eq!(&buf[..], &['a' as u8, 'b' as u8]);
 
@@ -971,22 +917,16 @@ mod tests {
     #[test]
     fn read_too_much() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all(&['a' as u8; 16])?;
 
@@ -1003,27 +943,21 @@ mod tests {
     #[test]
     fn read_too_much_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<NamedTempFile>,
-            Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
-            Aes256Ctr,
-            BLOCK_SIZE,
-            KEY_SIZE,
-        >::new(
-            StdIo::new(NamedTempFile::new()?),
-            &mut khf,
-            &mut ivg,
-            &mut crypter,
-        );
+        let mut blockio =
+            UnpaddedBlockIvCryptIo::<
+                FromStd<NamedTempFile>,
+                Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                Aes256Ctr,
+                BLOCK_SIZE,
+                KEY_SIZE,
+            >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
         blockio.write_all_at(&['a' as u8; 16], 0)?;
 
         let mut buf = vec![0; BLOCK_SIZE];
-        let n = blockio.read_at(&mut buf, 0)?;
+        let n = blockio.read_at(&mut buf, 0).unwrap();
 
         assert_eq!(n, 16);
         assert_eq!(&buf[..n], &['a' as u8; 16]);
@@ -1035,23 +969,17 @@ mod tests {
     fn random() -> Result<()> {
         for _ in 0..20 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-            let mut ivg = SequentialIvGenerator::new(16);
             let mut rng = ThreadRng::default();
             let mut crypter = Aes256Ctr::new();
 
-            let mut blockio = BlockIvRecryptIo::<
-                StdIo<NamedTempFile>,
-                Khf<Sha3_256, SHA3_256_MD_SIZE>,
-                SequentialIvGenerator,
-                Aes256Ctr,
-                BLOCK_SIZE,
-                KEY_SIZE,
-            >::new(
-                StdIo::new(NamedTempFile::new()?),
-                &mut khf,
-                &mut ivg,
-                &mut crypter,
-            );
+            let mut blockio =
+                UnpaddedBlockIvCryptIo::<
+                    FromStd<NamedTempFile>,
+                    Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                    Aes256Ctr,
+                    BLOCK_SIZE,
+                    KEY_SIZE,
+                >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
             let nbytes = rng.gen::<usize>() % (1 << 16);
             let mut pt = vec![0; nbytes];
@@ -1075,22 +1003,16 @@ mod tests {
         for _ in 0..20 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
             let mut rng = ThreadRng::default();
-            let mut ivg = SequentialIvGenerator::new(16);
             let mut crypter = Aes256Ctr::new();
 
-            let mut blockio = BlockIvRecryptIo::<
-                StdIo<NamedTempFile>,
-                Khf<Sha3_256, SHA3_256_MD_SIZE>,
-                SequentialIvGenerator,
-                Aes256Ctr,
-                BLOCK_SIZE,
-                KEY_SIZE,
-            >::new(
-                StdIo::new(NamedTempFile::new()?),
-                &mut khf,
-                &mut ivg,
-                &mut crypter,
-            );
+            let mut blockio =
+                UnpaddedBlockIvCryptIo::<
+                    FromStd<NamedTempFile>,
+                    Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                    Aes256Ctr,
+                    BLOCK_SIZE,
+                    KEY_SIZE,
+                >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
             let nbytes = rng.gen::<usize>() % (1 << 16);
             let mut pt = vec![0; nbytes];
@@ -1113,22 +1035,16 @@ mod tests {
         for _ in 0..10 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
             let mut rng = ThreadRng::default();
-            let mut ivg = SequentialIvGenerator::new(16);
             let mut crypter = Aes256Ctr::new();
 
-            let mut blockio = BlockIvRecryptIo::<
-                StdIo<NamedTempFile>,
-                Khf<Sha3_256, SHA3_256_MD_SIZE>,
-                SequentialIvGenerator,
-                Aes256Ctr,
-                BLOCK_SIZE,
-                KEY_SIZE,
-            >::new(
-                StdIo::new(NamedTempFile::new()?),
-                &mut khf,
-                &mut ivg,
-                &mut crypter,
-            );
+            let mut blockio =
+                UnpaddedBlockIvCryptIo::<
+                    FromStd<NamedTempFile>,
+                    Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                    Aes256Ctr,
+                    BLOCK_SIZE,
+                    KEY_SIZE,
+                >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
             let mut pt = vec![0; BLOCK_SIZE];
             rng.fill_bytes(&mut pt);
@@ -1153,22 +1069,16 @@ mod tests {
         for _ in 0..10 {
             let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
             let mut rng = ThreadRng::default();
-            let mut ivg = SequentialIvGenerator::new(16);
             let mut crypter = Aes256Ctr::new();
 
-            let mut blockio = BlockIvRecryptIo::<
-                StdIo<NamedTempFile>,
-                Khf<Sha3_256, SHA3_256_MD_SIZE>,
-                SequentialIvGenerator,
-                Aes256Ctr,
-                BLOCK_SIZE,
-                KEY_SIZE,
-            >::new(
-                StdIo::new(NamedTempFile::new()?),
-                &mut khf,
-                &mut ivg,
-                &mut crypter,
-            );
+            let mut blockio =
+                UnpaddedBlockIvCryptIo::<
+                    FromStd<NamedTempFile>,
+                    Khf<Sha3_256, SHA3_256_MD_SIZE>,
+                    Aes256Ctr,
+                    BLOCK_SIZE,
+                    KEY_SIZE,
+                >::new(FromStd::new(NamedTempFile::new()?), &mut khf, &mut crypter);
 
             let mut pt = vec![0; BLOCK_SIZE];
             rng.fill_bytes(&mut pt);
@@ -1190,27 +1100,24 @@ mod tests {
     #[test]
     fn correctness() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<File>,
+        let mut blockio = UnpaddedBlockIvCryptIo::<
+            FromStd<File>,
             Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
             Aes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
-            StdIo::new(
+            FromStd::new(
                 File::options()
                     .read(true)
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open("/tmp/blockivrecrypt")?,
+                    .open("/tmp/unpaddedblockivcrypt")?,
             ),
             &mut khf,
-            &mut ivg,
             &mut crypter,
         );
 
@@ -1222,11 +1129,11 @@ mod tests {
 
         let mut buf = vec![0; 36];
         blockio.seek(SeekFrom::Start(0).into())?;
-        blockio.read(&mut buf[0..7])?;
-        blockio.read(&mut buf[7..36])?;
+        blockio.read(&mut buf[0..7]).unwrap();
+        blockio.read(&mut buf[7..36]).unwrap();
 
         assert_eq!(n, 36);
-        assert_eq!(fs::metadata("/tmp/blockivrecrypt")?.len(), 52);
+        assert_eq!(fs::metadata("/tmp/unpaddedblockivcrypt")?.len(), 36);
         assert_eq!(&buf[0..7], &['a' as u8; 7]);
         assert_eq!(&buf[7..36], &['b' as u8; 29]);
 
@@ -1236,27 +1143,24 @@ mod tests {
     #[test]
     fn correctness_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<File>,
+        let mut blockio = UnpaddedBlockIvCryptIo::<
+            FromStd<File>,
             Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
             Aes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
-            StdIo::new(
+            FromStd::new(
                 File::options()
                     .read(true)
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open("/tmp/blockivrecrypt_at")?,
+                    .open("/tmp/unpaddedblockivcrypt_at")?,
             ),
             &mut khf,
-            &mut ivg,
             &mut crypter,
         );
 
@@ -1265,11 +1169,11 @@ mod tests {
         n += blockio.write_at(&['b' as u8; 29], 7)?;
 
         let mut buf = vec![0; 36];
-        blockio.read_at(&mut buf[0..7], 0)?;
-        blockio.read_at(&mut buf[7..36], 7)?;
+        blockio.read_at(&mut buf[0..7], 0).unwrap();
+        blockio.read_at(&mut buf[7..36], 7).unwrap();
 
         assert_eq!(n, 36);
-        assert_eq!(fs::metadata("/tmp/blockivrecrypt_at")?.len(), 52);
+        assert_eq!(fs::metadata("/tmp/unpaddedblockivcrypt_at")?.len(), 36);
         assert_eq!(&buf[0..7], &['a' as u8; 7]);
         assert_eq!(&buf[7..36], &['b' as u8; 29]);
 
@@ -1279,27 +1183,24 @@ mod tests {
     #[test]
     fn short() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<File>,
+        let mut blockio = UnpaddedBlockIvCryptIo::<
+            FromStd<File>,
             Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
             Aes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
-            StdIo::new(
+            FromStd::new(
                 File::options()
                     .read(true)
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open("/tmp/blockivrecrypt_short")?,
+                    .open("/tmp/unpaddedblockivcrypt_short")?,
             ),
             &mut khf,
-            &mut ivg,
             &mut crypter,
         );
 
@@ -1314,10 +1215,6 @@ mod tests {
         assert_eq!(n, 24);
         assert_eq!(m, 24);
         assert_eq!(&data[..n], &stuff);
-        assert_eq!(
-            fs::metadata("/tmp/blockivrecrypt_short")?.len(),
-            m as u64 + Aes256Ctr::iv_length() as u64
-        );
 
         Ok(())
     }
@@ -1325,27 +1222,24 @@ mod tests {
     #[test]
     fn short_at() -> Result<()> {
         let mut khf = Khf::new(&[4, 4, 4, 4], ThreadRng::default());
-        let mut ivg = SequentialIvGenerator::new(16);
         let mut crypter = Aes256Ctr::new();
 
-        let mut blockio = BlockIvRecryptIo::<
-            StdIo<File>,
+        let mut blockio = UnpaddedBlockIvCryptIo::<
+            FromStd<File>,
             Khf<Sha3_256, SHA3_256_MD_SIZE>,
-            SequentialIvGenerator,
             Aes256Ctr,
             BLOCK_SIZE,
             KEY_SIZE,
         >::new(
-            StdIo::new(
+            FromStd::new(
                 File::options()
                     .read(true)
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open("/tmp/blockivrecrypt_short_at")?,
+                    .open("/tmp/unpaddedblockivcrypt_short_at")?,
             ),
             &mut khf,
-            &mut ivg,
             &mut crypter,
         );
 
@@ -1357,10 +1251,6 @@ mod tests {
         assert_eq!(n, 24);
         assert_eq!(m, 24);
         assert_eq!(&data[..n], &['a' as u8; 24]);
-        assert_eq!(
-            fs::metadata("/tmp/blockivrecrypt_short_at")?.len(),
-            m as u64 + Aes256Ctr::iv_length() as u64
-        );
 
         Ok(())
     }
